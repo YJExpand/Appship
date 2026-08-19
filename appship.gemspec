@@ -3,8 +3,8 @@ Gem::Specification.new do |spec|
   spec.version       = "0.1.0"
   spec.authors       = ["appship contributors"]
   spec.email         = [""]
-  spec.summary       = "A standalone iOS build, IPA packaging, badge and PGYER upload CLI"
-  spec.description   = "Build any Xcode workspace or project, optionally add an app icon badge, package an IPA and upload it to PGYER."
+  spec.summary       = "A standalone iOS build, IPA packaging, badge and app distribution CLI"
+  spec.description   = "Build any Xcode workspace or project, optionally add an app icon badge, package an IPA and upload it to supported app distribution platforms."
   spec.homepage      = "https://github.com/your-org/appship"
   spec.license       = "MIT"
 

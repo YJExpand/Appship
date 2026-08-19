@@ -30,6 +30,8 @@ module Appship
         upload(args, global)
       when "pgyer"
         pgyer(args, global)
+      when "fir"
+        fir(args, global)
       when "version", "--version", "-v"
         puts "appship #{VERSION}"
       when nil, "help", "--help", "-h"
@@ -182,8 +184,8 @@ module Appship
       env_file = File.expand_path(options[:env_file], Dir.pwd)
 
       Dir.chdir(project_dir) do
-        profile = Cache.load(env_file, project_dir: project_dir, interactive: true).resolve(project_name: options[:project_name], project_dir: project_dir)
-        apply_cached_profile!(options, profile)
+        profile = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "pgyer").resolve(project_name: options[:project_name], project_dir: project_dir, provider: "pgyer")
+        apply_cached_profile!(options, profile, provider: "pgyer")
         infer_pgyer_target!(options)
         options[:output] ||= File.join(Cache::DEFAULT_BUILD_DIR, "#{options[:app_name]}.ipa")
 
@@ -199,10 +201,87 @@ module Appship
       end
     end
 
-    def apply_cached_profile!(options, profile)
+    def fir(args, global)
+      options = {
+        project_dir: Dir.pwd,
+        env_file: ENV.fetch("APPSHIP_ENV_FILE", Cache::DEFAULT_PATH),
+        project_name: nil,
+        app_name: nil,
+        workspace: nil,
+        project: nil,
+        scheme: nil,
+        configuration: nil,
+        configuration_explicit: false,
+        sdk: "iphoneos",
+        output: nil,
+        archive_path: nil,
+        export_path: nil,
+        export_options_plist: nil,
+        export_method: "adhoc",
+        signing_style: "automatic",
+        team_id: nil,
+        build_mode: "rebuild",
+        build_mode_explicit: false,
+        badge: nil,
+        badge_explicit: false,
+        assets: nil,
+        app_icon: "AppIcon",
+        upload: true,
+        provider: "fir",
+        fir_api_token: nil,
+        fir_api_token_env: "FIR_API_TOKEN",
+        bundle_id: nil,
+        app_version: nil,
+        build_number: nil,
+        release_type: "Adhoc",
+        icon: nil,
+        description: nil,
+        description_explicit: false,
+        clean: true,
+        keep_temporary: false,
+        allow_provisioning_updates: true,
+        skip_package_plugin_validation: true,
+        skip_macro_validation: true
+      }
+      parser = fir_parser(options)
+      parser.parse!(args)
+      raise ConfigurationError, "fir 不接受多余参数: #{args.join(" ")}" unless args.empty?
+
+      project_dir = File.expand_path(options[:project_dir])
+      raise ConfigurationError, "项目目录不存在: #{project_dir}" unless File.directory?(project_dir)
+      env_file = File.expand_path(options[:env_file], Dir.pwd)
+
+      Dir.chdir(project_dir) do
+        profile = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "fir").resolve(project_name: options[:project_name], project_dir: project_dir, provider: "fir")
+        apply_cached_profile!(options, profile, provider: "fir")
+        infer_pgyer_target!(options)
+        options[:output] ||= File.join(Cache::DEFAULT_BUILD_DIR, "#{options[:app_name]}.ipa")
+
+        runner = Runner.new(verbose: global[:verbose])
+        builder = Builder.new(runner: runner)
+        prepare_pgyer_flow!(options, builder)
+        if options[:build_mode] == "cache"
+          options[:app] ||= builder.find_cached_app!(options)
+          builder.package!(options)
+        else
+          builder.build!(options)
+        end
+      end
+    end
+
+    def apply_cached_profile!(options, profile, provider: "pgyer")
       options[:project_name] ||= profile["project_name"]
       options[:app_name] ||= profile["app_name"]
-      options[:api_key] ||= profile["pgyer_api_key"]
+      if provider.to_s == "fir"
+        options[:fir_api_token] ||= profile["fir_api_key"] || profile["fir_api_token"]
+        options[:bundle_id] ||= profile["bundle_id"]
+        options[:app_version] ||= profile["app_version"]
+        options[:build_number] ||= profile["build_number"]
+        options[:release_type] ||= profile["fir_release_type"] || "Adhoc"
+        options[:description] ||= profile["fir_update_description"]
+      else
+        options[:api_key] ||= profile["pgyer_api_key"]
+      end
       options[:workspace] ||= profile["workspace"]
       options[:project] ||= profile["project"]
       options[:scheme] ||= profile["scheme"] || options[:project_name]
@@ -210,16 +289,18 @@ module Appship
       options[:assets] ||= profile["assets"]
       options[:app_icon] ||= profile["app_icon"] || "AppIcon"
       options[:badge] ||= profile["badge"]
-      options[:password_env] ||= profile["pgyer_password_env"]
-      options[:password] ||= profile["pgyer_password"]
-      options[:password] ||= ENV[options[:password_env]] if options[:password_env]
-      options[:password] ||= ENV["PGYER_INSTALL_PASSWORD"]
-      options[:install_type] ||= profile["pgyer_install_type"] || 2
-      if options[:password].to_s.empty? && options[:install_type].to_i == 2
-        options[:install_type] = 1
-        puts "ℹ️ pgyer_password 为空，将使用公开安装模式（不设置密码）"
+      if provider.to_s != "fir"
+        options[:password_env] ||= profile["pgyer_password_env"]
+        options[:password] ||= profile["pgyer_password"]
+        options[:password] ||= ENV[options[:password_env]] if options[:password_env]
+        options[:password] ||= ENV["PGYER_INSTALL_PASSWORD"]
+        options[:install_type] ||= profile["pgyer_install_type"] || 2
+        if options[:password].to_s.empty? && options[:install_type].to_i == 2
+          options[:install_type] = 1
+          puts "ℹ️ pgyer_password 为空，将使用公开安装模式（不设置密码）"
+        end
+        options[:description] ||= profile["pgyer_update_description"]
       end
-      options[:description] ||= profile["pgyer_update_description"]
 
       raise ConfigurationError, "缓存缺少 project_name" if options[:project_name].to_s.empty?
       raise ConfigurationError, "缓存缺少 app_name" if options[:app_name].to_s.empty?
@@ -462,8 +543,17 @@ module Appship
 
     def upload_options(config)
       {
+        provider: config.get("upload", "provider", default: "pgyer"),
         api_key: nil,
         api_key_env: config.get("upload", "api_key_env", default: "PGYER_API_KEY"),
+        fir_api_token: nil,
+        fir_api_token_env: config.get("upload", "fir_api_token_env", default: "FIR_API_TOKEN"),
+        bundle_id: config.get("upload", "bundle_id"),
+        app_name: config.get("upload", "app_name"),
+        app_version: config.get("upload", "app_version"),
+        build_number: config.get("upload", "build_number"),
+        release_type: config.get("upload", "release_type"),
+        icon: config.get("upload", "icon"),
         install_type: config.get("upload", "install_type", default: 1),
         password: nil,
         password_env: config.get("upload", "password_env"),
@@ -569,10 +659,54 @@ module Appship
       end
     end
 
+    def fir_parser(options)
+      OptionParser.new do |opts|
+        opts.banner = "用法: appship fir [选项]"
+        opts.separator ""
+        opts.separator "项目与缓存"
+        opts.on("--project-dir PATH", "项目目录（默认当前目录）") { |value| options[:project_dir] = value }
+        opts.on("--env-file PATH", "本机缓存文件（默认 ~/.appship/.config）") { |value| options[:env_file] = value }
+        opts.on("--project-name NAME", "缓存中的 project_name") { |value| options[:project_name] = value }
+        opts.on("--app-name NAME", "fir.im 应用名称") { |value| options[:app_name] = value }
+        opts.on("--workspace PATH", "Xcode workspace 路径") { |value| options[:workspace] = value }
+        opts.on("--project PATH", "Xcode project 路径") { |value| options[:project] = value }
+        opts.on("--scheme NAME", "Scheme 名称") { |value| options[:scheme] = value }
+        opts.on("--configuration NAME", "构建配置（Debug/Release）") { |value| options[:configuration] = value; options[:configuration_explicit] = true }
+        opts.on("--output PATH", "最终 IPA 路径") { |value| options[:output] = value }
+        opts.on("--cache", "复用 DerivedData 中已有的 .app") { options[:build_mode] = "cache"; options[:build_mode_explicit] = true }
+        opts.on("--rebuild", "重新 archive/export 构建（默认）") { options[:build_mode] = "rebuild"; options[:build_mode_explicit] = true }
+        opts.separator ""
+        opts.separator "角标与导出"
+        opts.on("--badge TEXT", "添加图标角标，例如 DEBUG") { |value| options[:badge] = value; options[:badge_explicit] = true }
+        opts.on("--no-badge", "不添加角标") { options[:badge] = nil; options[:badge_explicit] = true }
+        opts.on("--assets PATH", "Assets.xcassets 路径") { |value| options[:assets] = value }
+        opts.on("--app-icon NAME", "AppIcon 名称") { |value| options[:app_icon] = value }
+        opts.on("--export-method NAME", "adhoc/inhouse 等") { |value| options[:export_method] = value }
+        opts.on("--team-id ID", "签名 Team ID") { |value| options[:team_id] = value }
+        opts.on("--no-allow-provisioning-updates", "不允许自动更新签名") { options[:allow_provisioning_updates] = false }
+        opts.separator ""
+        opts.separator "fir.im"
+        opts.on("--fir-api-key KEY", "覆盖缓存中的 fir_api_key") { |value| options[:fir_api_token] = value }
+        opts.on("--fir-api-token TOKEN", "fir.im API Token（不建议写入配置文件）") { |value| options[:fir_api_token] = value }
+        opts.on("--fir-api-token-env NAME", "fir.im API Token 环境变量名") { |value| options[:fir_api_token_env] = value }
+        opts.on("--bundle-id ID", "应用 Bundle ID（IPA 可自动读取）") { |value| options[:bundle_id] = value }
+        opts.on("--app-version VERSION", "应用版本号") { |value| options[:app_version] = value }
+        opts.on("--build-number NUMBER", "Build 号") { |value| options[:build_number] = value }
+        opts.on("--release-type TYPE", "iOS 打包类型（Adhoc 或 Inhouse）") { |value| options[:release_type] = value }
+        opts.on("--icon PATH", "应用图标路径（可选）") { |value| options[:icon] = value }
+        opts.on("--description TEXT", "更新描述") { |value| options[:description] = value; options[:description_explicit] = true }
+        opts.on("--no-clean", "不清理已有 archive/export 路径") { options[:clean] = false }
+        opts.on("--keep-temporary", "保留工具生成的临时目录") { options[:keep_temporary] = true }
+        opts.on("-h", "--help", "显示帮助") { puts opts; exit 0 }
+      end
+    end
+
     def add_upload_options(opts, options)
       opts.separator ""
+      opts.separator "分发平台"
+      opts.on("--provider NAME", "分发平台（pgyer 或 fir，默认 pgyer）") { |value| options[:provider] = value }
       opts.separator "蒲公英上传"
-      opts.on("--upload", "构建/打包后上传蒲公英") { options[:upload] = true }
+      opts.on("--upload", "构建/打包后上传到所选分发平台") { options[:upload] = true }
       opts.on("--api-key KEY", "蒲公英 API Key（不建议写入配置文件）") { |value| options[:api_key] = value }
       opts.on("--api-key-env NAME", "API Key 环境变量名") { |value| options[:api_key_env] = value }
       opts.on("--install-type N", Integer, "1=公开，2=密码，3=邀请") { |value| options[:install_type] = value }
@@ -581,6 +715,16 @@ module Appship
       opts.on("--description TEXT", "更新描述") { |value| options[:description] = value }
       opts.on("--channel NAME", "渠道短链接") { |value| options[:channel] = value }
       opts.on("--poll-attempts N", Integer, "轮询次数，默认 60") { |value| options[:poll_attempts] = value }
+      opts.separator ""
+      opts.separator "fir.im 上传"
+      opts.on("--fir-api-token TOKEN", "fir.im API Token（不建议写入配置文件）") { |value| options[:fir_api_token] = value }
+      opts.on("--fir-api-token-env NAME", "fir.im API Token 环境变量名") { |value| options[:fir_api_token_env] = value }
+      opts.on("--bundle-id ID", "fir.im 应用 Bundle ID（IPA 可自动读取）") { |value| options[:bundle_id] = value }
+      opts.on("--app-name NAME", "fir.im 应用名称") { |value| options[:app_name] = value }
+      opts.on("--app-version VERSION", "fir.im 应用版本号") { |value| options[:app_version] = value }
+      opts.on("--build-number NUMBER", "fir.im Build 号") { |value| options[:build_number] = value }
+      opts.on("--release-type TYPE", "iOS 打包类型（Adhoc 或 Inhouse）") { |value| options[:release_type] = value }
+      opts.on("--icon PATH", "fir.im 应用图标路径（可选）") { |value| options[:icon] = value }
     end
 
     def help
@@ -591,6 +735,7 @@ module Appship
           appship init [--path .appship.yml]
           appship doctor
           appship pgyer
+          appship fir
           appship build [选项]
           appship package --app path/to/App.app [选项]
           appship upload path/to/App.ipa [选项]
@@ -598,10 +743,12 @@ module Appship
         常用示例:
           appship init
           cd /path/to/project && appship pgyer
+          FIR_API_TOKEN=xxx appship fir --workspace MyApp.xcworkspace --scheme MyApp
           appship build --workspace MyApp.xcworkspace --scheme MyApp --configuration Debug
           appship build --project MyApp.xcodeproj --scheme MyApp --badge DEBUG --upload
           appship package --app build/Debug-iphoneos/MyApp.app --output build/MyApp.ipa
           PGYER_API_KEY=xxx appship upload build/MyApp.ipa --install-type 2 --password-env PGYER_INSTALL_PASSWORD
+          FIR_API_TOKEN=xxx appship upload build/MyApp.ipa --provider fir --bundle-id com.example.MyApp
 
         全局选项必须放在命令前:
           --config FILE       使用指定配置文件

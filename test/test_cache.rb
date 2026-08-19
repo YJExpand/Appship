@@ -76,4 +76,36 @@ class CacheTest < Minitest::Test
       $stdin = original_stdin
     end
   end
+
+  def test_guides_fir_api_key_when_cache_entry_is_missing_it
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      File.write(path, JSON.generate([{ "project_name" => "Demo", "app_name" => "DemoApp" }]))
+      original_stdin = $stdin
+      $stdin = InteractiveInput.new(["fir-secret"])
+
+      profile = Appship::Cache.load(path, provider: "fir").resolve(project_name: "Demo", provider: "fir")
+
+      assert_equal "fir-secret", profile["fir_api_key"]
+      assert_includes File.read(path), "fir_api_key"
+    ensure
+      $stdin = original_stdin
+    end
+  end
+
+  def test_guides_pgyer_api_key_when_cache_entry_is_missing_it
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      File.write(path, JSON.generate([{ "project_name" => "Demo", "app_name" => "DemoApp" }]))
+      original_stdin = $stdin
+      $stdin = InteractiveInput.new(["pgyer-secret"])
+
+      profile = Appship::Cache.load(path).resolve(project_name: "Demo")
+
+      assert_equal "pgyer-secret", profile["pgyer_api_key"]
+      assert_includes File.read(path), "pgyer_api_key"
+    ensure
+      $stdin = original_stdin
+    end
+  end
 end

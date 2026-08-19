@@ -213,6 +213,11 @@ module Appship
     module_function
 
     def upload_result(result, file:, options: {})
+      if result.is_a?(Hash) && result["provider"] == "fir"
+        fir_upload_result(result, file: file, options: options)
+        return
+      end
+
       data = result.is_a?(Hash) ? (result["data"] || result) : {}
       key = deep_find(data, "buildKey")
       name = deep_find(data, "buildName") || options[:app_name] || File.basename(file, File.extname(file))
@@ -248,6 +253,29 @@ module Appship
       puts "更新描述: #{description}"
       puts "安装密码: #{password}"
       puts "下载链接: #{url}"
+      puts "======================================================="
+    end
+
+    def fir_upload_result(result, file:, options: {})
+      data = result["data"].is_a?(Hash) ? result["data"] : result
+      name = data["name"] || options[:app_name] || File.basename(file, File.extname(file))
+      type = data["type"].to_s == "android" ? "Android" : "iOS"
+      version = data["version"]
+      build = data["build"]
+      version_info = if version && !version.to_s.empty?
+                       build && !build.to_s.empty? ? "#{version}(#{build})" : version.to_s
+                     end
+
+      puts ""
+      puts "======================================================="
+      puts "                   🎉 发布完成 🎉                      "
+      puts "======================================================="
+      puts "分发平台: fir.im"
+      puts "应用名称: #{name}"
+      puts "应用类型: #{type}"
+      puts "版本信息: #{version_info}" if version_info
+      puts "更新描述: #{options[:description] || ""}"
+      puts "下载链接: #{result["url"]}"
       puts "======================================================="
     end
 

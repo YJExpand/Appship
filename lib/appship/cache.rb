@@ -8,7 +8,7 @@ module Appship
 
     attr_reader :path, :entries
 
-    def self.load(path = DEFAULT_PATH, project_dir: Dir.pwd, interactive: true)
+    def self.load(path = DEFAULT_PATH, project_dir: Dir.pwd, interactive: true, provider: "pgyer")
       expanded = File.expand_path(path)
       # 兼容早期版本的 ~/.appship/.env；发现旧缓存时迁移到新的 .config。
       if expanded == DEFAULT_PATH && !File.file?(expanded) && File.file?(LEGACY_PATH)
@@ -19,15 +19,15 @@ module Appship
 
       unless File.file?(expanded)
         create_file!(expanded)
-        return collect_interactively!(expanded, project_dir: project_dir) if interactive && $stdin.tty?
+        return collect_interactively!(expanded, project_dir: project_dir, provider: provider) if interactive && $stdin.tty?
 
-        raise ConfigurationError, "已创建本机缓存文件: #{expanded}\n请填写 project_name、app_name、pgyer_api_key；pgyer_password 可为空"
+        raise ConfigurationError, missing_credentials_message(expanded, provider, created: true)
       end
 
       if File.read(expanded).strip.empty?
-        return collect_interactively!(expanded, project_dir: project_dir) if interactive && $stdin.tty?
+        return collect_interactively!(expanded, project_dir: project_dir, provider: provider) if interactive && $stdin.tty?
 
-        raise ConfigurationError, "本机缓存文件为空: #{expanded}\n请填写 project_name、app_name、pgyer_api_key；pgyer_password 可为空"
+        raise ConfigurationError, missing_credentials_message(expanded, provider, empty: true)
       end
 
       new(expanded)
@@ -41,23 +41,23 @@ module Appship
       path
     end
 
-    def self.collect_interactively!(path, project_dir: Dir.pwd)
+    def self.collect_interactively!(path, project_dir: Dir.pwd, provider: "pgyer")
       project_name = infer_project_name!(project_dir)
+      provider_name = provider.to_s == "fir" ? "fir.im" : "pgyer"
+      credential_key = credential_key_for(provider)
       puts ""
-      puts "首次使用 appship pgyer，请填写本机项目缓存。"
+      puts "首次使用 appship #{provider_name}，请填写本机项目缓存。"
       puts "缓存文件: #{path}"
       puts ""
       puts "✅ 已从 #{File.basename(project_name)}.xcodeproj 识别 project_name: #{project_name}"
       app_name = prompt_required("app_name")
-      pgyer_api_key = prompt_required("pgyer_api_key")
-      pgyer_password = prompt_optional("pgyer_password")
-      data = [{
+      data = {
         "project_name" => project_name,
         "app_name" => app_name,
-        "pgyer_api_key" => pgyer_api_key,
-        "pgyer_password" => pgyer_password
-      }]
-      File.write(path, JSON.pretty_generate(data) + "\n")
+        credential_key => prompt_required(credential_key)
+      }
+      data["pgyer_password"] = prompt_optional("pgyer_password") if provider.to_s != "fir"
+      File.write(path, JSON.pretty_generate([data]) + "\n")
       File.chmod(0o600, path)
       puts ""
       puts "✅ 本机缓存已保存: #{path}"
@@ -102,7 +102,7 @@ module Appship
       raise ConfigurationError, "缓存文件解析失败: #{e.message}"
     end
 
-    def resolve(project_name: nil, project_dir: Dir.pwd)
+    def resolve(project_name: nil, project_dir: Dir.pwd, provider: "pgyer", interactive: true)
       candidate_name = project_name.to_s.strip
       if candidate_name.empty? && @entries.length > 1
         directory_name = File.basename(File.expand_path(project_dir))
@@ -115,6 +115,7 @@ module Appship
                   @entries.select { |entry| entry["project_name"] == candidate_name }
                 end
       if matches.length == 1
+        ensure_provider_credential!(matches.first, provider, interactive: interactive)
         return matches.first
       end
       if matches.empty?
@@ -128,6 +129,23 @@ module Appship
 
     private
 
+    def self.credential_key_for(provider)
+      provider.to_s == "fir" ? "fir_api_key" : "pgyer_api_key"
+    end
+
+    def self.missing_credentials_message(path, provider, created: false, empty: false)
+      prefix = if created
+                 "已创建本机缓存文件: #{path}"
+               elsif empty
+                 "本机缓存文件为空: #{path}"
+               else
+                 "本机缓存文件无效: #{path}"
+               end
+      key = credential_key_for(provider)
+      suffix = key == "pgyer_api_key" ? "；pgyer_password 可为空" : ""
+      "#{prefix}\n请填写 project_name、app_name、#{key}#{suffix}"
+    end
+
     def parse(content)
       JSON.parse(content)
     rescue JSON::ParserError
@@ -138,6 +156,29 @@ module Appship
       raise ConfigurationError, "缓存数组中的每一项必须是字典" unless entry.is_a?(Hash)
 
       entry.transform_keys(&:to_s)
+    end
+
+    def ensure_provider_credential!(entry, provider, interactive:)
+      key = self.class.send(:credential_key_for, provider)
+      if key == "fir_api_key" && entry[key].to_s.empty? && !entry["fir_api_token"].to_s.empty?
+        entry[key] = entry["fir_api_token"]
+        persist!
+      end
+      return entry unless entry[key].to_s.empty?
+
+      unless interactive && $stdin.tty?
+        raise ConfigurationError, "缓存缺少 #{key}: #{@path}\n请填写 #{key} 后重试"
+      end
+
+      entry[key] = self.class.prompt_required(key)
+      persist!
+      puts "✅ 已补充 #{key}: #{@path}"
+      entry
+    end
+
+    def persist!
+      File.write(@path, JSON.pretty_generate(@entries) + "\n")
+      File.chmod(0o600, @path)
     end
   end
 end

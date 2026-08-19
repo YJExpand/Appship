@@ -2,6 +2,24 @@
 
 module Appship
   class Uploader
+    SUPPORTED_PROVIDERS = %w[pgyer fir].freeze
+
+    def initialize(options = {})
+      provider = (options[:provider] || "pgyer").to_s.downcase
+      provider = "fir" if provider == "fir.im"
+      unless SUPPORTED_PROVIDERS.include?(provider)
+        raise ConfigurationError, "不支持的分发平台: #{options[:provider]}（可选 pgyer 或 fir）"
+      end
+
+      @delegate = provider == "fir" ? FirUploader.new(options) : PgyerUploader.new(options)
+    end
+
+    def upload!(file)
+      @delegate.upload!(file)
+    end
+  end
+
+  class PgyerUploader
     PGYER_HOST = "www.pgyer.com"
 
     def initialize(options = {})
@@ -141,6 +159,192 @@ module Appship
     end
   end
 
+  class FirUploader
+    FIR_API_HOST = "api.appmeta.cn"
+
+    def initialize(options = {})
+      @options = options
+      @api_token = options[:fir_api_token] || options[:api_token]
+      @api_token ||= ENV[options[:fir_api_token_env] || options[:api_token_env] || "FIR_API_TOKEN"]
+      if @api_token.to_s.empty?
+        raise ConfigurationError, "缺少 fir.im API Token，请使用 --fir-api-token 或 FIR_API_TOKEN"
+      end
+    end
+
+    def upload!(file)
+      raise ConfigurationError, "IPA/APK 文件不存在: #{file}" unless File.file?(file)
+
+      type = package_type(file)
+      metadata = package_metadata(file)
+      bundle_id = metadata[:bundle_id]
+      if bundle_id.to_s.empty?
+        raise ConfigurationError, "缺少应用 Bundle ID，请使用 --bundle-id 指定（fir.im 上传凭证需要该参数）"
+      end
+
+      puts "☁️ 获取 fir.im 上传凭证..."
+      app = request_credentials(type, bundle_id)
+      binary = app.dig("cert", "binary") || {}
+      unless [binary["key"], binary["token"], binary["upload_url"]].all? { |value| !value.to_s.empty? }
+        raise UploadError, "获取 fir.im 上传凭证失败: #{app}"
+      end
+
+      puts "☁️ 上传 #{File.basename(file)}（#{format_size(File.size(file))}）到 fir.im..."
+      upload_binary!(file, binary, metadata, type)
+
+      icon = @options[:icon]
+      upload_icon!(icon, app.dig("cert", "icon")) if icon
+
+      short = app["short"]
+      {
+        "provider" => "fir",
+        "data" => {
+          "id" => app["id"],
+          "short" => short,
+          "name" => metadata[:app_name],
+          "bundle_id" => bundle_id,
+          "version" => metadata[:version],
+          "build" => metadata[:build],
+          "type" => type
+        },
+        "url" => short.to_s.empty? ? "https://fir.im/" : "https://fir.im/#{short}"
+      }
+    end
+
+    private
+
+    def package_type(file)
+      case File.extname(file).downcase
+      when ".ipa" then "ios"
+      when ".apk" then "android"
+      else
+        raise ConfigurationError, "fir.im 只支持 .ipa 或 .apk 文件: #{file}"
+      end
+    end
+
+    def package_metadata(file)
+      info = File.extname(file).casecmp(".ipa").zero? ? ipa_info(file) : {}
+      {
+        bundle_id: @options[:bundle_id] || info["CFBundleIdentifier"],
+        app_name: @options[:app_name] || info["CFBundleDisplayName"] || info["CFBundleName"] || File.basename(file, File.extname(file)),
+        version: @options[:app_version] || info["CFBundleShortVersionString"] || "1.0",
+        build: @options[:build_number] || info["CFBundleVersion"] || "1"
+      }
+    end
+
+    def ipa_info(file)
+      return {} unless Runner.which("unzip") && Runner.which("plutil")
+
+      entries, _, status = Open3.capture3("unzip", "-Z1", file)
+      return {} unless status.success?
+
+      plist_entry = entries.lines.map(&:strip).find { |entry| entry.match?(%r{\APayload/[^/]+\.app/Info\.plist\z}) }
+      return {} unless plist_entry
+
+      plist_data, _, plist_status = Open3.capture3("unzip", "-p", file, plist_entry)
+      return {} unless plist_status.success?
+
+      Tempfile.create(["appship-fir-info", ".plist"]) do |plist|
+        plist.binmode
+        plist.write(plist_data)
+        plist.flush
+        json, _, json_status = Open3.capture3("plutil", "-convert", "json", "-o", "-", plist.path)
+        return JSON.parse(json) if json_status.success?
+      end
+      {}
+    rescue JSON::ParserError, Errno::ENOENT
+      {}
+    end
+
+    def request_credentials(type, bundle_id)
+      response = post_json!("https://#{FIR_API_HOST}/apps", {
+        "type" => type,
+        "bundle_id" => bundle_id,
+        "api_token" => @api_token
+      })
+      response["data"].is_a?(Hash) ? response["data"] : response
+    end
+
+    def upload_binary!(file, certificate, metadata, type)
+      fields = {
+        "key" => certificate["key"],
+        "token" => certificate["token"],
+        "x:name" => metadata[:app_name],
+        "x:version" => metadata[:version],
+        "x:build" => metadata[:build]
+      }
+      if type == "ios"
+        fields["x:release_type"] = @options[:release_type] || "Adhoc"
+      end
+      add_field(fields, "x:changelog", @options[:description])
+      multipart_upload!(certificate["upload_url"], fields, file)
+    end
+
+    def upload_icon!(icon, certificate)
+      raise ConfigurationError, "fir.im 图标文件不存在: #{icon}" unless File.file?(icon)
+      unless certificate.is_a?(Hash) && [certificate["key"], certificate["token"], certificate["upload_url"]].all? { |value| !value.to_s.empty? }
+        raise UploadError, "获取 fir.im 图标上传凭证失败"
+      end
+
+      puts "☁️ 上传 fir.im 应用图标..."
+      multipart_upload!(certificate["upload_url"], {
+        "key" => certificate["key"],
+        "token" => certificate["token"]
+      }, icon)
+    end
+
+    def post_json!(url, payload)
+      uri = URI.parse(url)
+      request = Net::HTTP::Post.new(uri)
+      request["Content-Type"] = "application/json"
+      request.body = JSON.generate(payload)
+      response = http(uri).request(request)
+      json = JSON.parse(response.body)
+      return json if response.is_a?(Net::HTTPSuccess)
+
+      raise UploadError, "fir.im API 请求失败（HTTP #{response.code}）: #{json}"
+    rescue JSON::ParserError
+      raise UploadError, "fir.im API 返回了无法解析的响应（HTTP #{response&.code}）: #{response&.body}"
+    end
+
+    def multipart_upload!(url, fields, file)
+      uri = URI.parse(url)
+      boundary = "----AppshipFirUpload#{SecureRandom.hex(12)}"
+      progress = UploadProgress.new(File.size(file))
+      progress.start
+      body = MultipartBody.new(fields, file, boundary, progress: progress.method(:update))
+      request = Net::HTTP::Post.new(uri)
+      request["Content-Type"] = "multipart/form-data; boundary=#{boundary}"
+      request["Content-Length"] = body.length.to_s
+      request.body_stream = body
+      response = http(uri).request(request)
+      return true if response.is_a?(Net::HTTPSuccess)
+
+      raise UploadError, "fir.im 文件上传失败（HTTP #{response.code}）: #{response.body}"
+    ensure
+      progress&.finish
+    end
+
+    def http(uri)
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = uri.scheme == "https"
+      http.open_timeout = (@options[:open_timeout] || 30).to_i
+      http.read_timeout = (@options[:read_timeout] || 600).to_i
+      http
+    end
+
+    def add_field(hash, key, value)
+      hash[key] = value.to_s unless value.nil? || value.to_s.empty?
+    end
+
+    def format_size(bytes)
+      return "#{bytes}B" if bytes < 1024
+      return format("%.1fKB", bytes / 1024.0) if bytes < 1024 * 1024
+      return format("%.1fMB", bytes / 1024.0 / 1024.0) if bytes < 1024 * 1024 * 1024
+
+      format("%.1fGB", bytes / 1024.0 / 1024.0 / 1024.0)
+    end
+  end
+
   class UploadProgress
     BAR_WIDTH = 24
 
@@ -218,7 +422,7 @@ module Appship
       @segments << "\r\n--#{boundary}--\r\n"
       @index = 0
       @offset = 0
-      @length = @segments.sum { |segment| segment.respond_to?(:size) ? segment.size : 0 }
+      @length = @segments.sum { |segment| segment.respond_to?(:read) ? segment.size : segment.bytesize }
     end
 
     def length

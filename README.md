@@ -7,7 +7,7 @@
 - 从已有 `.app` 打包 IPA
 - 给 App Icon 添加 DEBUG、RELEASE 等环境角标
 - 重新签名修改后的 App
-- 上传 IPA/APK 到蒲公英并等待构建结果
+- 上传 IPA/APK 到蒲公英或 fir.im
 
 它不要求工程使用固定的项目名或目录结构。
 
@@ -122,6 +122,35 @@ appship upload build/MyApp-Debug.ipa \
 
 上传 IPA/APK 到蒲公英时，终端会显示实时上传进度、百分比和文件大小。
 
+## 上传 fir.im
+
+使用 fir.im API Token 上传已生成的 IPA/APK。IPA 会自动读取 Bundle ID、应用名称、版本号和 Build 号；如果无法读取，使用命令行参数补充：
+
+```bash
+export FIR_API_TOKEN="your-fir-api-token"
+appship upload build/MyApp.ipa \
+  --provider fir \
+  --bundle-id com.example.MyApp \
+  --description "测试版本"
+```
+
+也可以在构建或打包时直接上传：
+
+```bash
+FIR_API_TOKEN="$FIR_API_TOKEN" \
+  appship build --workspace MyApp.xcworkspace --scheme MyApp \
+  --export-method adhoc --provider fir --upload --bundle-id com.example.MyApp
+```
+
+fir.im 的 iOS 上传包需要使用 Ad Hoc 或 InHouse 签名；默认上传类型为 `Adhoc`，也可以通过 `--release-type Inhouse` 指定。图标不是必填项，如需更新 fir.im 应用图标可使用 `--icon path/to/icon.png`。
+
+如果希望使用和蒲公英相同的快捷命令，`appship fir` 会读取本机 `.config`，检查并补充 `fir_api_key`，然后默认采用 Ad Hoc 导出并上传 fir.im：
+
+```bash
+FIR_API_TOKEN="$FIR_API_TOKEN" \
+  appship fir --workspace MyApp.xcworkspace --scheme MyApp
+```
+
 CI 示例：
 
 ```bash
@@ -137,15 +166,16 @@ PGYER_API_KEY="$PGYER_API_KEY" \
 appship init       创建配置模板
 appship doctor     检查本机依赖
 appship pgyer      读取本机缓存并构建、上传蒲公英
+appship fir        构建并上传 fir.im
 appship build      archive、export 并生成 IPA
 appship package    将已有 .app 打包成 IPA
-appship upload     上传已有 IPA/APK
+appship upload     上传已有 IPA/APK（蒲公英或 fir.im）
 appship version    查看版本
 ```
 
 ## 安全建议
 
-`.appship.yml` 只保存工程配置；普通上传命令的 API Key 和安装密码通过环境变量传入，`appship pgyer` 使用本机私有缓存 `~/.appship/.config`。不要提交真实 API Key、IPA 或 xcarchive。
+`.appship.yml` 只保存工程配置；上传命令的 API Key、fir.im Token 和安装密码通过环境变量传入，`appship pgyer` 使用本机私有缓存 `~/.appship/.config`。不要提交真实凭证、IPA 或 xcarchive。
 
 ## 一键发布蒲公英
 
@@ -158,6 +188,8 @@ appship pgyer
 ```
 
 `appship pgyer` 默认从本机缓存 `~/.appship/.config` 读取项目配置。如果文件或目录不存在，工具会从当前目录唯一的 `.xcodeproj` 文件名自动获取 `project_name`，然后交互式引导填写 `app_name`、`pgyer_api_key` 和可选的 `pgyer_password`。密码为空时使用公开安装模式，不设置安装密码。如果找不到或存在多个 `.xcodeproj`，命令会直接报错。文件内容是 JSON 或 YAML 字典数组，例如：
+
+每次执行 `appship pgyer` 都会检查当前项目缓存中的 `pgyer_api_key`；如果缺失，会在交互终端中引导补填。`appship fir` 使用同样的机制检查并补填 `fir_api_key`。
 
 `appship pgyer` 生成的默认 IPA 会保存到 `~/.appship/build/`，也可以使用 `--output` 指定其他路径。
 
