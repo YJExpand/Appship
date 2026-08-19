@@ -1,0 +1,143 @@
+# frozen_string_literal: true
+
+module Appship
+  class Cache
+    DEFAULT_PATH = File.expand_path("~/.appship/.config")
+    DEFAULT_BUILD_DIR = File.expand_path("~/.appship/build")
+    LEGACY_PATH = File.expand_path("~/.appship/.env")
+
+    attr_reader :path, :entries
+
+    def self.load(path = DEFAULT_PATH, project_dir: Dir.pwd, interactive: true)
+      expanded = File.expand_path(path)
+      # 兼容早期版本的 ~/.appship/.env；发现旧缓存时迁移到新的 .config。
+      if expanded == DEFAULT_PATH && !File.file?(expanded) && File.file?(LEGACY_PATH)
+        FileUtils.mkdir_p(File.dirname(expanded))
+        FileUtils.cp(LEGACY_PATH, expanded)
+        File.chmod(0o600, expanded)
+      end
+
+      unless File.file?(expanded)
+        create_file!(expanded)
+        return collect_interactively!(expanded, project_dir: project_dir) if interactive && $stdin.tty?
+
+        raise ConfigurationError, "已创建本机缓存文件: #{expanded}\n请填写 project_name、app_name、pgyer_api_key；pgyer_password 可为空"
+      end
+
+      if File.read(expanded).strip.empty?
+        return collect_interactively!(expanded, project_dir: project_dir) if interactive && $stdin.tty?
+
+        raise ConfigurationError, "本机缓存文件为空: #{expanded}\n请填写 project_name、app_name、pgyer_api_key；pgyer_password 可为空"
+      end
+
+      new(expanded)
+    end
+
+    def self.create_file!(path)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.chmod(0o700, File.dirname(path)) if File.directory?(File.dirname(path))
+      File.write(path, "[]\n") unless File.exist?(path)
+      File.chmod(0o600, path)
+      path
+    end
+
+    def self.collect_interactively!(path, project_dir: Dir.pwd)
+      project_name = infer_project_name!(project_dir)
+      puts ""
+      puts "首次使用 appship pgyer，请填写本机项目缓存。"
+      puts "缓存文件: #{path}"
+      puts ""
+      puts "✅ 已从 #{File.basename(project_name)}.xcodeproj 识别 project_name: #{project_name}"
+      app_name = prompt_required("app_name")
+      pgyer_api_key = prompt_required("pgyer_api_key")
+      pgyer_password = prompt_optional("pgyer_password")
+      data = [{
+        "project_name" => project_name,
+        "app_name" => app_name,
+        "pgyer_api_key" => pgyer_api_key,
+        "pgyer_password" => pgyer_password
+      }]
+      File.write(path, JSON.pretty_generate(data) + "\n")
+      File.chmod(0o600, path)
+      puts ""
+      puts "✅ 本机缓存已保存: #{path}"
+      new(path)
+    end
+
+    def self.infer_project_name!(project_dir)
+      xcodeprojects = Dir[File.join(File.expand_path(project_dir), "*.xcodeproj")]
+      if xcodeprojects.empty?
+        raise ConfigurationError, "当前目录找不到 .xcodeproj，无法自动设置 project_name: #{File.expand_path(project_dir)}"
+      end
+      if xcodeprojects.length > 1
+        names = xcodeprojects.map { |path| File.basename(path, ".xcodeproj") }.join(", ")
+        raise ConfigurationError, "当前目录找到多个 .xcodeproj，无法确定 project_name: #{names}"
+      end
+
+      File.basename(xcodeprojects.first, ".xcodeproj")
+    end
+
+    def self.prompt_required(name)
+      print "请输入 #{name}: "
+      value = $stdin.gets&.strip
+      raise ConfigurationError, "#{name} 不能为空" if value.to_s.empty?
+
+      value
+    end
+
+    def self.prompt_optional(name)
+      print "请输入 #{name}（可为空，直接回车表示不设置密码）: "
+      $stdin.gets.to_s.strip
+    end
+
+    def initialize(path = DEFAULT_PATH)
+      @path = File.expand_path(path)
+      raise ConfigurationError, "本机缓存文件不存在: #{@path}\n请使用 --env-file 指定路径" unless File.file?(@path)
+
+      @entries = parse(File.read(@path))
+      raise ConfigurationError, "缓存文件必须是字典数组: #{@path}" unless @entries.is_a?(Array)
+      @entries = @entries.map { |entry| normalize(entry) }
+      raise ConfigurationError, "缓存文件中没有有效项目: #{@path}" if @entries.empty?
+    rescue Psych::SyntaxError => e
+      raise ConfigurationError, "缓存文件解析失败: #{e.message}"
+    end
+
+    def resolve(project_name: nil, project_dir: Dir.pwd)
+      candidate_name = project_name.to_s.strip
+      if candidate_name.empty? && @entries.length > 1
+        directory_name = File.basename(File.expand_path(project_dir))
+        candidate_name = directory_name if @entries.any? { |entry| entry["project_name"] == directory_name }
+      end
+
+      matches = if candidate_name.empty?
+                  @entries
+                else
+                  @entries.select { |entry| entry["project_name"] == candidate_name }
+                end
+      if matches.length == 1
+        return matches.first
+      end
+      if matches.empty?
+        available = @entries.filter_map { |entry| entry["project_name"] }.join(", ")
+        raise ConfigurationError, "找不到项目缓存 #{candidate_name.inspect}，可用项目: #{available}"
+      end
+
+      names = matches.filter_map { |entry| entry["project_name"] }.join(", ")
+      raise ConfigurationError, "本机缓存包含多个项目，请使用 --project-name 指定: #{names}"
+    end
+
+    private
+
+    def parse(content)
+      JSON.parse(content)
+    rescue JSON::ParserError
+      YAML.safe_load(content, permitted_classes: [], aliases: false)
+    end
+
+    def normalize(entry)
+      raise ConfigurationError, "缓存数组中的每一项必须是字典" unless entry.is_a?(Hash)
+
+      entry.transform_keys(&:to_s)
+    end
+  end
+end
