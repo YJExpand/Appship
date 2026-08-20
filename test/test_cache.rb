@@ -93,6 +93,22 @@ class CacheTest < Minitest::Test
     end
   end
 
+  def test_guides_fir_credentials_on_first_use
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      FileUtils.mkdir_p(File.join(directory, "Demo.xcodeproj"))
+      original_stdin = $stdin
+      $stdin = InteractiveInput.new(%w[DemoApp fir-secret install-secret])
+
+      profile = Appship::Cache.load(path, project_dir: directory, provider: "fir").resolve(project_name: "Demo", provider: "fir")
+
+      assert_equal "fir-secret", profile["fir_api_key"]
+      assert_equal "install-secret", profile["fir_password"]
+    ensure
+      $stdin = original_stdin
+    end
+  end
+
   def test_guides_pgyer_api_key_when_cache_entry_is_missing_it
     Dir.mktmpdir do |directory|
       path = File.join(directory, ".config")
@@ -106,6 +122,25 @@ class CacheTest < Minitest::Test
       assert_includes File.read(path), "pgyer_api_key"
     ensure
       $stdin = original_stdin
+    end
+  end
+
+  def test_credential_overrides_are_persisted
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      File.write(path, JSON.generate([{ "project_name" => "Demo", "app_name" => "DemoApp", "fir_api_key" => "old-key", "fir_password" => "old-password" }]))
+
+      cache = Appship::Cache.load(path, provider: "fir", interactive: false)
+      cache.resolve(
+        project_name: "Demo",
+        provider: "fir",
+        interactive: false,
+        credential_overrides: { "fir_api_key" => "new-key", "fir_password" => "new-password" }
+      )
+
+      saved = JSON.parse(File.read(path)).first
+      assert_equal "new-key", saved["fir_api_key"]
+      assert_equal "new-password", saved["fir_password"]
     end
   end
 end

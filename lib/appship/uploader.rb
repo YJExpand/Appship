@@ -166,6 +166,8 @@ module Appship
       @options = options
       @api_token = options[:fir_api_token] || options[:api_token]
       @api_token ||= ENV[options[:fir_api_token_env] || options[:api_token_env] || "FIR_API_TOKEN"]
+      @password = options[:fir_password] || options[:password]
+      @password ||= ENV[options[:fir_password_env] || options[:password_env] || "FIR_PASSWORD"]
       if @api_token.to_s.empty?
         raise ConfigurationError, "缺少 fir.im API Token，请使用 --fir-api-token 或 FIR_API_TOKEN"
       end
@@ -193,6 +195,7 @@ module Appship
 
       icon = @options[:icon]
       upload_icon!(icon, app.dig("cert", "icon")) if icon
+      update_access_password!(app["id"], @password) unless @password.to_s.empty?
 
       short = app["short"]
       {
@@ -204,6 +207,7 @@ module Appship
           "bundle_id" => bundle_id,
           "version" => metadata[:version],
           "build" => metadata[:build],
+          "password_protected" => !@password.to_s.empty?,
           "type" => type
         },
         "url" => short.to_s.empty? ? "https://fir.im/" : "https://fir.im/#{short}"
@@ -290,6 +294,25 @@ module Appship
         "key" => certificate["key"],
         "token" => certificate["token"]
       }, icon)
+    end
+
+    def update_access_password!(app_id, password)
+      if app_id.to_s.empty?
+        raise UploadError, "fir.im 返回结果缺少应用 ID，无法设置访问密码"
+      end
+
+      puts "🔒 设置 fir.im 访客密码..."
+      uri = URI.parse("https://#{FIR_API_HOST}/apps/#{URI.encode_www_form_component(app_id)}")
+      request = Net::HTTP::Put.new(uri)
+      request["Content-Type"] = "application/x-www-form-urlencoded"
+      request.body = URI.encode_www_form("api_token" => @api_token, "passwd" => password)
+      response = http(uri).request(request)
+      json = JSON.parse(response.body)
+      return json if response.is_a?(Net::HTTPSuccess)
+
+      raise UploadError, "fir.im 访问密码设置失败（HTTP #{response.code}）: #{json}"
+    rescue JSON::ParserError
+      raise UploadError, "fir.im 访问密码设置失败（HTTP #{response&.code}）: #{response&.body}"
     end
 
     def post_json!(url, payload)

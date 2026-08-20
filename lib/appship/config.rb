@@ -21,6 +21,7 @@ module Appship
         provider: pgyer
         api_key_env: PGYER_API_KEY
         # fir_api_token_env: FIR_API_TOKEN
+        # fir_password_env: FIR_PASSWORD
         install_type: 1
         # password_env: PGYER_INSTALL_PASSWORD
         # channel: internal

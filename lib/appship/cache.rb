@@ -56,7 +56,8 @@ module Appship
         "app_name" => app_name,
         credential_key => prompt_required(credential_key)
       }
-      data["pgyer_password"] = prompt_optional("pgyer_password") if provider.to_s != "fir"
+      password_key = provider.to_s == "fir" ? "fir_password" : "pgyer_password"
+      data[password_key] = prompt_optional(password_key)
       File.write(path, JSON.pretty_generate([data]) + "\n")
       File.chmod(0o600, path)
       puts ""
@@ -102,7 +103,7 @@ module Appship
       raise ConfigurationError, "缓存文件解析失败: #{e.message}"
     end
 
-    def resolve(project_name: nil, project_dir: Dir.pwd, provider: "pgyer", interactive: true)
+    def resolve(project_name: nil, project_dir: Dir.pwd, provider: "pgyer", interactive: true, credential_overrides: {})
       candidate_name = project_name.to_s.strip
       if candidate_name.empty? && @entries.length > 1
         directory_name = File.basename(File.expand_path(project_dir))
@@ -113,8 +114,9 @@ module Appship
                   @entries
                 else
                   @entries.select { |entry| entry["project_name"] == candidate_name }
-                end
+      end
       if matches.length == 1
+        update_profile!(matches.first, credential_overrides) unless credential_overrides.empty?
         ensure_provider_credential!(matches.first, provider, interactive: interactive)
         return matches.first
       end
@@ -125,6 +127,12 @@ module Appship
 
       names = matches.filter_map { |entry| entry["project_name"] }.join(", ")
       raise ConfigurationError, "本机缓存包含多个项目，请使用 --project-name 指定: #{names}"
+    end
+
+    def update_profile!(entry, values)
+      values.each { |key, value| entry[key.to_s] = value unless value.nil? }
+      persist!
+      entry
     end
 
     private
@@ -142,7 +150,8 @@ module Appship
                  "本机缓存文件无效: #{path}"
                end
       key = credential_key_for(provider)
-      suffix = key == "pgyer_api_key" ? "；pgyer_password 可为空" : ""
+      password_key = key == "pgyer_api_key" ? "pgyer_password" : "fir_password"
+      suffix = "；#{password_key} 可为空"
       "#{prefix}\n请填写 project_name、app_name、#{key}#{suffix}"
     end
 
@@ -164,7 +173,10 @@ module Appship
         entry[key] = entry["fir_api_token"]
         persist!
       end
-      return entry unless entry[key].to_s.empty?
+      unless entry[key].to_s.empty?
+        ensure_provider_password!(entry, provider, interactive: interactive)
+        return entry
+      end
 
       unless interactive && $stdin.tty?
         raise ConfigurationError, "缓存缺少 #{key}: #{@path}\n请填写 #{key} 后重试"
@@ -173,7 +185,18 @@ module Appship
       entry[key] = self.class.prompt_required(key)
       persist!
       puts "✅ 已补充 #{key}: #{@path}"
+      ensure_provider_password!(entry, provider, interactive: interactive)
       entry
+    end
+
+    def ensure_provider_password!(entry, provider, interactive:)
+      password_key = provider.to_s == "fir" ? "fir_password" : "pgyer_password"
+      return if entry.key?(password_key)
+      return unless interactive && $stdin.tty?
+
+      entry[password_key] = self.class.prompt_optional(password_key)
+      persist!
+      puts "✅ 已补充 #{password_key}: #{@path}"
     end
 
     def persist!

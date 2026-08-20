@@ -144,6 +144,20 @@ FIR_API_TOKEN="$FIR_API_TOKEN" \
 
 fir.im 的 iOS 上传包需要使用 Ad Hoc 或 InHouse 签名；默认上传类型为 `Adhoc`，也可以通过 `--release-type Inhouse` 指定。图标不是必填项，如需更新 fir.im 应用图标可使用 `--icon path/to/icon.png`。
 
+首次使用 `appship fir` 时还会引导填写 `fir_password`。密码为空表示公开访问；填写后 appship 会在上传完成后设置 fir.im 下载页的访客密码。也可以使用 `--fir-password-env FIR_PASSWORD` 指定环境变量。
+
+更新 fir.im 缓存凭证：
+
+```bash
+appship fir -key new-fir-api-key -password new-password
+```
+
+蒲公英使用同样的写法：
+
+```bash
+appship pgyer -key new-pgyer-api-key -password new-password
+```
+
 如果希望使用和蒲公英相同的快捷命令，`appship fir` 会读取本机 `.config`，检查并补充 `fir_api_key`，然后默认采用 Ad Hoc 导出并上传 fir.im：
 
 ```bash
@@ -189,7 +203,7 @@ appship pgyer
 
 `appship pgyer` 默认从本机缓存 `~/.appship/.config` 读取项目配置。如果文件或目录不存在，工具会从当前目录唯一的 `.xcodeproj` 文件名自动获取 `project_name`，然后交互式引导填写 `app_name`、`pgyer_api_key` 和可选的 `pgyer_password`。密码为空时使用公开安装模式，不设置安装密码。如果找不到或存在多个 `.xcodeproj`，命令会直接报错。文件内容是 JSON 或 YAML 字典数组，例如：
 
-每次执行 `appship pgyer` 都会检查当前项目缓存中的 `pgyer_api_key`；如果缺失，会在交互终端中引导补填。`appship fir` 使用同样的机制检查并补填 `fir_api_key`。
+每次执行 `appship pgyer` 都会检查当前项目缓存中的 `pgyer_api_key` 和 `pgyer_password`；如果缺失，会在交互终端中引导补填。`appship fir` 使用同样的机制检查并补填 `fir_api_key` 和 `fir_password`。
 
 `appship pgyer` 生成的默认 IPA 会保存到 `~/.appship/build/`，也可以使用 `--output` 指定其他路径。
 

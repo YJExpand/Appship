@@ -63,6 +63,21 @@ module Appship
       { config_path: config_path, verbose: verbose }
     end
 
+    def normalize_provider_short_options!(args, provider)
+      key_option = provider.to_s == "fir" ? "--fir-api-key" : "--api-key"
+      password_option = provider.to_s == "fir" ? "--fir-password" : "--password"
+      args.map! do |arg|
+        case arg
+        when "-key" then key_option
+        when "-password" then password_option
+        else
+          arg = "#{key_option}=#{arg.delete_prefix("-key=")}" if arg.start_with?("-key=")
+          arg = "#{password_option}=#{arg.delete_prefix("-password=")}" if arg.start_with?("-password=")
+          arg
+        end
+      end
+    end
+
     def init(args)
       path = File.join(Dir.pwd, ".appship.yml")
       force = false
@@ -176,6 +191,7 @@ module Appship
         skip_macro_validation: true
       }
       parser = pgyer_parser(options)
+      normalize_provider_short_options!(args, "pgyer")
       parser.parse!(args)
       raise ConfigurationError, "pgyer 不接受多余参数: #{args.join(" ")}" unless args.empty?
 
@@ -184,7 +200,13 @@ module Appship
       env_file = File.expand_path(options[:env_file], Dir.pwd)
 
       Dir.chdir(project_dir) do
-        profile = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "pgyer").resolve(project_name: options[:project_name], project_dir: project_dir, provider: "pgyer")
+        cache = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "pgyer")
+        profile = cache.resolve(
+          project_name: options[:project_name],
+          project_dir: project_dir,
+          provider: "pgyer",
+          credential_overrides: { "pgyer_api_key" => options[:api_key], "pgyer_password" => options[:password] }.compact
+        )
         apply_cached_profile!(options, profile, provider: "pgyer")
         infer_pgyer_target!(options)
         options[:output] ||= File.join(Cache::DEFAULT_BUILD_DIR, "#{options[:app_name]}.ipa")
@@ -230,6 +252,8 @@ module Appship
         provider: "fir",
         fir_api_token: nil,
         fir_api_token_env: "FIR_API_TOKEN",
+        fir_password: nil,
+        fir_password_env: "FIR_PASSWORD",
         bundle_id: nil,
         app_version: nil,
         build_number: nil,
@@ -244,6 +268,7 @@ module Appship
         skip_macro_validation: true
       }
       parser = fir_parser(options)
+      normalize_provider_short_options!(args, "fir")
       parser.parse!(args)
       raise ConfigurationError, "fir 不接受多余参数: #{args.join(" ")}" unless args.empty?
 
@@ -252,7 +277,13 @@ module Appship
       env_file = File.expand_path(options[:env_file], Dir.pwd)
 
       Dir.chdir(project_dir) do
-        profile = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "fir").resolve(project_name: options[:project_name], project_dir: project_dir, provider: "fir")
+        cache = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "fir")
+        profile = cache.resolve(
+          project_name: options[:project_name],
+          project_dir: project_dir,
+          provider: "fir",
+          credential_overrides: { "fir_api_key" => options[:fir_api_token], "fir_password" => options[:fir_password] }.compact
+        )
         apply_cached_profile!(options, profile, provider: "fir")
         infer_pgyer_target!(options)
         options[:output] ||= File.join(Cache::DEFAULT_BUILD_DIR, "#{options[:app_name]}.ipa")
@@ -274,6 +305,8 @@ module Appship
       options[:app_name] ||= profile["app_name"]
       if provider.to_s == "fir"
         options[:fir_api_token] ||= profile["fir_api_key"] || profile["fir_api_token"]
+        options[:fir_password] ||= profile["fir_password"]
+        options[:fir_password] ||= ENV[options[:fir_password_env]] if options[:fir_password_env]
         options[:bundle_id] ||= profile["bundle_id"]
         options[:app_version] ||= profile["app_version"]
         options[:build_number] ||= profile["build_number"]
@@ -548,6 +581,8 @@ module Appship
         api_key_env: config.get("upload", "api_key_env", default: "PGYER_API_KEY"),
         fir_api_token: nil,
         fir_api_token_env: config.get("upload", "fir_api_token_env", default: "FIR_API_TOKEN"),
+        fir_password: config.get("upload", "fir_password"),
+        fir_password_env: config.get("upload", "fir_password_env", default: "FIR_PASSWORD"),
         bundle_id: config.get("upload", "bundle_id"),
         app_name: config.get("upload", "app_name"),
         app_version: config.get("upload", "app_version"),
@@ -648,9 +683,10 @@ module Appship
         opts.on("--no-allow-provisioning-updates", "不允许自动更新签名") { options[:allow_provisioning_updates] = false }
         opts.separator ""
         opts.separator "蒲公英"
-        opts.on("--api-key KEY", "覆盖缓存中的 pgyer_api_key") { |value| options[:api_key] = value }
+        opts.separator "简写：-key KEY、-password PASSWORD 会同时更新本机缓存"
+        opts.on("--api-key KEY", "覆盖并保存缓存中的 pgyer_api_key") { |value| options[:api_key] = value }
         opts.on("--install-type N", Integer, "1=公开，2=密码，3=邀请") { |value| options[:install_type] = value }
-        opts.on("--password PASSWORD", "安装密码") { |value| options[:password] = value }
+        opts.on("--password PASSWORD", "覆盖并保存缓存中的 pgyer_password") { |value| options[:password] = value }
         opts.on("--password-env NAME", "安装密码环境变量名") { |value| options[:password_env] = value }
         opts.on("--description TEXT", "更新描述") { |value| options[:description] = value; options[:description_explicit] = true }
         opts.on("--channel NAME", "渠道短链接") { |value| options[:channel] = value }
@@ -686,9 +722,12 @@ module Appship
         opts.on("--no-allow-provisioning-updates", "不允许自动更新签名") { options[:allow_provisioning_updates] = false }
         opts.separator ""
         opts.separator "fir.im"
-        opts.on("--fir-api-key KEY", "覆盖缓存中的 fir_api_key") { |value| options[:fir_api_token] = value }
+        opts.separator "简写：-key KEY、-password PASSWORD 会同时更新本机缓存"
+        opts.on("--fir-api-key KEY", "覆盖并保存缓存中的 fir_api_key") { |value| options[:fir_api_token] = value }
         opts.on("--fir-api-token TOKEN", "fir.im API Token（不建议写入配置文件）") { |value| options[:fir_api_token] = value }
         opts.on("--fir-api-token-env NAME", "fir.im API Token 环境变量名") { |value| options[:fir_api_token_env] = value }
+        opts.on("--fir-password PASSWORD", "覆盖并保存缓存中的 fir_password") { |value| options[:fir_password] = value }
+        opts.on("--fir-password-env NAME", "fir.im 访客密码环境变量名") { |value| options[:fir_password_env] = value }
         opts.on("--bundle-id ID", "应用 Bundle ID（IPA 可自动读取）") { |value| options[:bundle_id] = value }
         opts.on("--app-version VERSION", "应用版本号") { |value| options[:app_version] = value }
         opts.on("--build-number NUMBER", "Build 号") { |value| options[:build_number] = value }
@@ -719,6 +758,8 @@ module Appship
       opts.separator "fir.im 上传"
       opts.on("--fir-api-token TOKEN", "fir.im API Token（不建议写入配置文件）") { |value| options[:fir_api_token] = value }
       opts.on("--fir-api-token-env NAME", "fir.im API Token 环境变量名") { |value| options[:fir_api_token_env] = value }
+      opts.on("--fir-password PASSWORD", "fir.im 访客密码") { |value| options[:fir_password] = value }
+      opts.on("--fir-password-env NAME", "fir.im 访客密码环境变量名") { |value| options[:fir_password_env] = value }
       opts.on("--bundle-id ID", "fir.im 应用 Bundle ID（IPA 可自动读取）") { |value| options[:bundle_id] = value }
       opts.on("--app-name NAME", "fir.im 应用名称") { |value| options[:app_name] = value }
       opts.on("--app-version VERSION", "fir.im 应用版本号") { |value| options[:app_version] = value }

@@ -7,7 +7,7 @@ require_relative "../lib/appship"
 class FirUploaderTest < Minitest::Test
   def test_requests_credentials_and_uploads_binary_with_fir_fields
     uploader_class = Class.new(Appship::FirUploader) do
-      attr_reader :credential_request, :binary_upload
+      attr_reader :credential_request, :binary_upload, :password_update
 
       private
 
@@ -30,6 +30,11 @@ class FirUploaderTest < Minitest::Test
         @binary_upload = [url, fields, file]
         true
       end
+
+      def update_access_password!(app_id, password)
+        @password_update = [app_id, password]
+        true
+      end
     end
 
     Tempfile.create(["demo", ".ipa"]) do |file|
@@ -42,6 +47,7 @@ class FirUploaderTest < Minitest::Test
         app_version: "1.2.3",
         build_number: "42",
         release_type: "Inhouse",
+        fir_password: "install-secret",
         description: "first build"
       )
 
@@ -61,8 +67,10 @@ class FirUploaderTest < Minitest::Test
       assert_equal "42", uploader.binary_upload[1]["x:build"]
       assert_equal "Inhouse", uploader.binary_upload[1]["x:release_type"]
       assert_equal "first build", uploader.binary_upload[1]["x:changelog"]
+      assert_equal ["app-id", "install-secret"], uploader.password_update
       assert_equal "https://fir.im/demo", result["url"]
       assert_equal "fir", result["provider"]
+      assert result["data"]["password_protected"]
     end
   end
 

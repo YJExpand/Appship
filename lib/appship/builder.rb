@@ -275,6 +275,7 @@ module Appship
       puts "应用类型: #{type}"
       puts "版本信息: #{version_info}" if version_info
       puts "更新描述: #{options[:description] || ""}"
+      puts "访问密码: #{data["password_protected"] ? "已设置" : "未设置"}"
       puts "下载链接: #{result["url"]}"
       puts "======================================================="
     end
