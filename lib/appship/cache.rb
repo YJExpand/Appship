@@ -41,24 +41,27 @@ module Appship
       path
     end
 
-    def self.collect_interactively!(path, project_dir: Dir.pwd, provider: "pgyer")
-      project_name = infer_project_name!(project_dir)
+    def self.collect_interactively!(path, project_dir: Dir.pwd, provider: "pgyer", entries: [], project_name: nil, credential_overrides: {})
+      project_name ||= infer_project_name!(project_dir)
+      unless [".xcodeproj", ".xcworkspace"].any? { |extension| File.directory?(File.join(project_dir, "#{project_name}#{extension}")) }
+        raise ConfigurationError, "当前目录找不到 #{project_name}.xcodeproj 或 #{project_name}.xcworkspace，无法新增项目配置: #{File.expand_path(project_dir)}"
+      end
       provider_name = provider.to_s == "fir" ? "fir.im" : "pgyer"
       credential_key = credential_key_for(provider)
       puts ""
-      puts "首次使用 appship #{provider_name}，请填写本机项目缓存。"
+      puts "首次使用当前项目的 appship #{provider_name}，请填写本机项目缓存。"
       puts "缓存文件: #{path}"
       puts ""
-      puts "✅ 已从 #{File.basename(project_name)}.xcodeproj 识别 project_name: #{project_name}"
+      puts "✅ 已识别 project_name: #{project_name}"
       app_name = prompt_required("app_name")
       data = {
         "project_name" => project_name,
         "app_name" => app_name,
-        credential_key => prompt_required(credential_key)
+        credential_key => credential_overrides[credential_key] || prompt_required(credential_key)
       }
       password_key = provider.to_s == "fir" ? "fir_password" : "pgyer_password"
-      data[password_key] = prompt_optional(password_key)
-      File.write(path, JSON.pretty_generate([data]) + "\n")
+      data[password_key] = credential_overrides.fetch(password_key) { prompt_optional(password_key) }
+      File.write(path, JSON.pretty_generate(entries + [data]) + "\n")
       File.chmod(0o600, path)
       puts ""
       puts "✅ 本机缓存已保存: #{path}"
@@ -104,16 +107,22 @@ module Appship
     end
 
     def resolve(project_name: nil, project_dir: Dir.pwd, provider: "pgyer", interactive: true, credential_overrides: {})
-      candidate_name = project_name.to_s.strip
-      if candidate_name.empty? && @entries.length > 1
-        directory_name = File.basename(File.expand_path(project_dir))
-        candidate_name = directory_name if @entries.any? { |entry| entry["project_name"] == directory_name }
+      candidate_names = [project_name.to_s.strip].reject(&:empty?)
+      if candidate_names.empty?
+        directory = File.expand_path(project_dir)
+        candidate_names = Dir[File.join(directory, "*.xcodeproj"), File.join(directory, "*.xcworkspace")]
+                          .select { |path| File.directory?(path) }
+                          .map { |path| File.basename(path, File.extname(path)) }.uniq
+        if candidate_names.empty? && @entries.length > 1
+          directory_name = File.basename(directory)
+          candidate_names = [directory_name] if @entries.any? { |entry| entry["project_name"] == directory_name }
+        end
       end
 
-      matches = if candidate_name.empty?
+      matches = if candidate_names.empty?
                   @entries
                 else
-                  @entries.select { |entry| entry["project_name"] == candidate_name }
+                  @entries.select { |entry| candidate_names.include?(entry["project_name"]) }
       end
       if matches.length == 1
         update_profile!(matches.first, credential_overrides) unless credential_overrides.empty?
@@ -121,8 +130,27 @@ module Appship
         return matches.first
       end
       if matches.empty?
+        if interactive && $stdin.tty?
+          puts "ℹ️ 当前项目没有匹配的 project_name，将引导新增项目配置。"
+          cache = self.class.collect_interactively!(
+            @path,
+            project_dir: project_dir,
+            provider: provider,
+            entries: @entries,
+            project_name: candidate_names.one? ? candidate_names.first : nil,
+            credential_overrides: credential_overrides
+          )
+          @entries = cache.entries
+          return @entries.last
+        end
+
         available = @entries.filter_map { |entry| entry["project_name"] }.join(", ")
-        raise ConfigurationError, "找不到项目缓存 #{candidate_name.inspect}，可用项目: #{available}"
+        key = self.class.send(:credential_key_for, provider)
+        raise ConfigurationError, "当前项目没有匹配的 project_name: #{candidate_names.join(", ")}\n" \
+                                  "请在 #{@path} 的配置数组中增加当前项目配置，保留已有项目。\n" \
+                                  "project_name 应填写: #{candidate_names.join(" 或 ")}（不含 .xcodeproj/.xcworkspace 后缀）\n" \
+                                  "同时填写 app_name、#{key}；安装密码可为空。\n" \
+                                  "已有项目: #{available}"
       end
 
       names = matches.filter_map { |entry| entry["project_name"] }.join(", ")

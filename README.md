@@ -52,6 +52,19 @@ appship fir
 
 等待片刻...
 
+配置保存在 `~/.appship/.config` 的数组中，`project_name` 对应当前目录的 `.xcodeproj` 或 `.xcworkspace` 名称，不包含后缀。切换项目后，工具会根据工程名匹配配置；如果没有匹配项，交互终端会直接进入首次配置引导，自动识别 `project_name`，依次输入 `app_name`、API Key 和可选密码。填写完成后自动追加到配置数组，保留已有项目，并继续构建流程。例如新增的配置项：
+
+```json
+{
+  "project_name": "Demo",
+  "app_name": "DemoApp",
+  "pgyer_api_key": "your-api-key",
+  "pgyer_password": ""
+}
+```
+
+使用 fir.im 时，引导填写的字段为 `fir_api_key` 和 `fir_password`。使用 `--env-file` 时，新项目配置会保存到指定文件；非交互环境则提示手动补充配置。
+
 ```
 =======================================================
                    🎉 发布完成 🎉

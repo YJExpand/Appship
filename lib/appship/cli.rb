@@ -349,12 +349,16 @@ module Appship
       elsif File.exist?(project)
         options[:project] = project
       else
-        candidates = Dir["*.xcworkspace", "*.xcodeproj"]
-        if candidates.length == 1
-          options[File.extname(candidates.first) == ".xcworkspace" ? :workspace : :project] = candidates.first
-        else
-          raise ConfigurationError, "找不到 #{options[:project_name]}.xcworkspace 或 #{options[:project_name]}.xcodeproj"
-        end
+        names = Dir["*.xcworkspace", "*.xcodeproj"].select { |path| File.directory?(path) }
+                                                .map { |path| File.basename(path, File.extname(path)) }.uniq
+        config_path = File.expand_path(options[:env_file] || Cache::DEFAULT_PATH)
+        hint = if names.empty?
+                 "请先 cd 到包含 .xcodeproj/.xcworkspace 的项目目录，或使用 --project-dir 指定目录。"
+               else
+                 "当前目录可配置的 project_name: #{names.join(", ")}（不含文件后缀）"
+               end
+        raise ConfigurationError, "找不到 #{workspace} 或 #{project}\n当前目录: #{Dir.pwd}\n" \
+                                  "请在 #{config_path} 的配置数组中增加当前项目配置，设置正确的 project_name。\n#{hint}"
       end
 
       if options[:assets].to_s.empty?

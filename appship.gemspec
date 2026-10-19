@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = "appship"
-  spec.version       = "0.1.0"
+  spec.version       = "0.1.1"
   spec.authors       = ["YJExpand"]
   spec.email         = ["yjexpand@163.com"]
   spec.summary       = "A standalone iOS build, IPA packaging, badge and app distribution CLI"
