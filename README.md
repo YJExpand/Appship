@@ -20,11 +20,14 @@ gantt
 
 ## 安装
 
-```
-gem install appship
+macOS 默认的 zsh 终端只需执行以下两条命令：
 
-export PATH="$(ruby -e 'print Gem.user_dir')/bin:$PATH"
+```bash
+gem install appship
+echo 'export PATH="$(ruby -rrubygems -e "print Gem.bindir"):$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
+
+第二条命令只需执行一次：将 gem 的命令目录写入 `~/.zshrc`，并立即加载。以后重新打开终端，即可直接执行 `appship pgyer` 或 `appship fir`。
 
 ### 环境依赖
 
