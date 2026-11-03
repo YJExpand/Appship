@@ -30,7 +30,11 @@ module Appship
         raise ConfigurationError, missing_credentials_message(expanded, provider, empty: true)
       end
 
-      new(expanded)
+      cache = new(expanded)
+      return cache unless cache.entries.empty?
+      return collect_interactively!(expanded, project_dir: project_dir, provider: provider) if interactive && $stdin.tty?
+
+      raise ConfigurationError, missing_credentials_message(expanded, provider, empty: true)
     end
 
     def self.create_file!(path)
@@ -57,6 +61,8 @@ module Appship
       data = {
         "project_name" => project_name,
         "app_name" => app_name,
+        "wechat_webhook" => "",
+        "dingtalk_webhook" => "",
         credential_key => credential_overrides[credential_key] || prompt_required(credential_key)
       }
       password_key = provider.to_s == "fir" ? "fir_password" : "pgyer_password"
@@ -91,7 +97,10 @@ module Appship
 
     def self.prompt_optional(name)
       print "请输入 #{name}（可为空，直接回车表示不设置密码）: "
-      $stdin.gets.to_s.strip
+      value = $stdin.gets
+      raise ConfigurationError, "配置输入已中断，请重新执行命令继续填写" unless value
+
+      value.strip
     end
 
     def initialize(path = DEFAULT_PATH)
@@ -101,12 +110,11 @@ module Appship
       @entries = parse(File.read(@path))
       raise ConfigurationError, "缓存文件必须是字典数组: #{@path}" unless @entries.is_a?(Array)
       @entries = @entries.map { |entry| normalize(entry) }
-      raise ConfigurationError, "缓存文件中没有有效项目: #{@path}" if @entries.empty?
     rescue Psych::SyntaxError => e
       raise ConfigurationError, "缓存文件解析失败: #{e.message}"
     end
 
-    def resolve(project_name: nil, project_dir: Dir.pwd, provider: "pgyer", interactive: true, credential_overrides: {})
+    def resolve(project_name: nil, project_dir: Dir.pwd, provider: "pgyer", interactive: true, credential_overrides: {}, credentials: true)
       candidate_names = [project_name.to_s.strip].reject(&:empty?)
       if candidate_names.empty?
         directory = File.expand_path(project_dir)
@@ -126,7 +134,7 @@ module Appship
       end
       if matches.length == 1
         update_profile!(matches.first, credential_overrides) unless credential_overrides.empty?
-        ensure_provider_credential!(matches.first, provider, interactive: interactive)
+        ensure_provider_credential!(matches.first, provider, interactive: interactive) if credentials
         return matches.first
       end
       if matches.empty?

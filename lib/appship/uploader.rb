@@ -84,11 +84,13 @@ module Appship
       request["Content-Length"] = body.length.to_s
       request.body_stream = body
       response = http(uri).request(request)
-      return true if response.code.to_i == 204 || response.is_a?(Net::HTTPSuccess)
+      success = response.is_a?(Net::HTTPSuccess)
+      return true if success
 
       raise UploadError, "蒲公英文件上传失败（HTTP #{response.code}）: #{response.body}"
     ensure
-      progress&.finish
+      progress&.finish(success: !!success)
+      body&.close
     end
 
     def poll_build_info!(build_key)
@@ -340,11 +342,13 @@ module Appship
       request["Content-Length"] = body.length.to_s
       request.body_stream = body
       response = http(uri).request(request)
-      return true if response.is_a?(Net::HTTPSuccess)
+      success = response.is_a?(Net::HTTPSuccess)
+      return true if success
 
       raise UploadError, "fir.im 文件上传失败（HTTP #{response.code}）: #{response.body}"
     ensure
-      progress&.finish
+      progress&.finish(success: !!success)
+      body&.close
     end
 
     def http(uri)
@@ -377,6 +381,7 @@ module Appship
       @interactive = output.tty?
       @last_percent = -1
       @started = false
+      @current = 0
     end
 
     def start
@@ -385,20 +390,27 @@ module Appship
     end
 
     def update(current, total = @total)
-      @total = [total.to_i, 1].max
-      percent = [[(current.to_i * 100.0 / @total).floor, 0].max, 100].min
-      return if percent == @last_percent
-
-      render(percent, current.to_i)
-    end
-
-    def finish
       return unless @started
 
-      render(100, @total)
-      if @interactive
-        @output.print "\r\e[2K"
+      @total = [total.to_i, 1].max
+      @current = [[current.to_i, 0].max, @total].min
+      percent = [(@current * 100.0 / @total).floor, 99].min
+      return if percent == @last_percent
+
+      render(percent, @current)
+    end
+
+    def finish(success: false)
+      return unless @started
+
+      @started = false
+      if success
+        render(100, @total)
+        @output.print "\r\e[2K" if @interactive
         @output.puts "☁️ 上传完成（#{format_size(@total)}）"
+      else
+        @output.print "\r\e[2K" if @interactive
+        @output.puts "❌ 上传失败（已读取 #{format_size(@current)}/#{format_size(@total)}）"
       end
       @output.flush
     end
@@ -450,6 +462,10 @@ module Appship
 
     def length
       @length
+    end
+
+    def close
+      @file.close unless @file.closed?
     end
 
     def read(length = nil, out_buffer = nil)

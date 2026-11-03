@@ -13,16 +13,23 @@ module Appship
     end
 
     def start(argv)
+      @notification_options = nil
       args = argv.dup
       global = extract_global_options!(args)
       command = args.shift
-      Message.initialize_default!
+      if %w[build package upload pgyer fir].include?(command)
+        @notification_options = {}
+      else
+        Message.initialize_default!
+      end
 
       case command
       when "init"
         init(args)
       when "message"
         message(args)
+      when "webhook"
+        webhook(args)
       when "doctor"
         doctor
       when "build"
@@ -42,9 +49,43 @@ module Appship
       else
         raise ConfigurationError, "未知命令: #{command}\n\n#{help}"
       end
+    rescue StandardError, Interrupt => e
+      notify_failure(e)
+      raise
     end
 
     private
+
+    def notify_failure(error)
+      return unless @notification_options
+
+      options = @notification_options.dup
+      unless [options[:wechat_webhook], options[:dingtalk_webhook]].any? { |url| !url.to_s.strip.empty? }
+        path = File.expand_path(options[:env_file] || ENV.fetch("APPSHIP_ENV_FILE", Cache::DEFAULT_PATH))
+        return unless File.file?(path)
+
+        directory = File.expand_path(options[:project_dir] || Dir.pwd)
+        if options[:project_name].to_s.empty? && Dir[File.join(directory, "*.xcodeproj"), File.join(directory, "*.xcworkspace")].empty?
+          return
+        end
+        begin
+          profile = Cache.new(path).resolve(project_name: options[:project_name], project_dir: directory,
+                                            interactive: false, credentials: false)
+        rescue Error, SystemCallError
+          return
+        end
+        options = {
+          app_name: profile["app_name"], project_name: profile["project_name"],
+          api_key: profile["pgyer_api_key"], password: profile["pgyer_password"],
+          fir_api_token: profile["fir_api_key"], fir_password: profile["fir_password"]
+        }.merge(options.compact)
+        options[:wechat_webhook] = profile["wechat_webhook"]
+        options[:dingtalk_webhook] = profile["dingtalk_webhook"]
+      end
+      Webhook.new(options).failure(error)
+    rescue StandardError => e
+      warn "⚠️ 失败通知未能发送（#{e.class}），保留原始错误"
+    end
 
     def extract_global_options!(args)
       config_path = nil
@@ -128,6 +169,34 @@ module Appship
       raise ConfigurationError, "编辑器配置无效: #{e.message}"
     end
 
+    def webhook(args)
+      options = { project_dir: Dir.pwd, env_file: ENV.fetch("APPSHIP_ENV_FILE", Cache::DEFAULT_PATH), project_name: nil }
+      parser = OptionParser.new do |opts|
+        opts.banner = '用法: appship webhook wechat|dingtalk URL [选项]（URL 传 "" 可关闭通知）'
+        opts.on("--project-dir PATH", "项目目录（默认当前目录）") { |value| options[:project_dir] = value }
+        opts.on("--env-file PATH", "本机缓存文件（默认 ~/.appship/.config）") { |value| options[:env_file] = value }
+        opts.on("--project-name NAME", "配置中的 project_name") { |value| options[:project_name] = value }
+        opts.on("-h", "--help", "显示帮助") { puts opts; return }
+      end
+      parser.parse!(args)
+      return puts(parser) if args.empty?
+      unless args.length == 2 && Webhook::PLATFORMS.key?(args.first)
+        raise ConfigurationError, "请指定 wechat 或 dingtalk，以及完整的 Webhook URL\n#{parser}"
+      end
+
+      platform, url = args
+      url = url.strip
+      Webhook.parse_url!(url) unless url.empty?
+      project_dir = File.expand_path(options[:project_dir])
+      raise ConfigurationError, "项目目录不存在: #{project_dir}" unless File.directory?(project_dir)
+
+      cache = Cache.load(options[:env_file], project_dir: project_dir, interactive: false)
+      profile = cache.resolve(project_name: options[:project_name], project_dir: project_dir, interactive: false, credentials: false)
+      cache.update_profile!(profile, "#{platform}_webhook" => url)
+      action = url.empty? ? "已关闭" : "已保存"
+      puts "✅ #{Webhook::PLATFORMS.fetch(platform)}通知#{action}（#{profile["project_name"]}）: #{cache.path}"
+    end
+
     def doctor
       checks = {
         "ruby" => "运行 CLI",
@@ -155,8 +224,10 @@ module Appship
     def build(args, global)
       config = Config.find(global[:config_path])
       options = build_options(config)
+      @notification_options = options
       parser = build_parser(options)
       parser.parse!(args)
+      Message.initialize_default!
       Builder.new(runner: Runner.new(verbose: global[:verbose])).build!(options)
     end
 
@@ -169,16 +240,20 @@ module Appship
         assets: config.get("assets"),
         app_icon: config.get("app_icon", default: "AppIcon")
       )
+      @notification_options = options
       parser = package_parser(options)
       parser.parse!(args)
+      Message.initialize_default!
       Builder.new(runner: Runner.new(verbose: global[:verbose])).package!(options)
     end
 
     def upload(args, global)
       config = Config.find(global[:config_path])
       options = upload_options(config).merge(file: nil)
+      @notification_options = options
       parser = upload_parser(options)
       parser.parse!(args)
+      Message.initialize_default!
       options[:file] ||= args.shift
       raise ConfigurationError, "请指定 IPA/APK 文件路径" unless options[:file]
       raise ConfigurationError, "upload 不接受多余参数: #{args.join(" ")}" unless args.empty?
@@ -227,9 +302,11 @@ module Appship
         skip_package_plugin_validation: true,
         skip_macro_validation: true
       }
+      @notification_options = options
       parser = pgyer_parser(options)
       normalize_provider_short_options!(args, "pgyer")
       parser.parse!(args)
+      Message.initialize_default!
       raise ConfigurationError, "pgyer 不接受多余参数: #{args.join(" ")}" unless args.empty?
 
       project_dir = File.expand_path(options[:project_dir])
@@ -304,9 +381,11 @@ module Appship
         skip_package_plugin_validation: true,
         skip_macro_validation: true
       }
+      @notification_options = options
       parser = fir_parser(options)
       normalize_provider_short_options!(args, "fir")
       parser.parse!(args)
+      Message.initialize_default!
       raise ConfigurationError, "fir 不接受多余参数: #{args.join(" ")}" unless args.empty?
 
       project_dir = File.expand_path(options[:project_dir])
@@ -359,6 +438,8 @@ module Appship
       options[:assets] ||= profile["assets"]
       options[:app_icon] ||= profile["app_icon"] || "AppIcon"
       options[:badge] ||= profile["badge"]
+      options[:wechat_webhook] = profile["wechat_webhook"]
+      options[:dingtalk_webhook] = profile["dingtalk_webhook"]
       if provider.to_s != "fir"
         options[:password_env] ||= profile["pgyer_password_env"]
         options[:password] ||= profile["pgyer_password"]
@@ -434,18 +515,12 @@ module Appship
       end
 
       if options[:build_mode] == "cache"
-        begin
-          puts ""
-          puts "📦 使用缓存模式"
-          options[:app] ||= with_spinner("正在查找编译缓存中的 .app 文件") do
-            builder.find_cached_app!(options)
-          end
-          puts "✅ 找到缓存 App: #{options[:app]}"
-        rescue CommandError => e
-          puts "⚠️ #{e.message}，将切换到重新构建模式"
-          options[:build_mode] = "rebuild"
-          options[:app] = nil
+        puts ""
+        puts "📦 使用缓存模式"
+        options[:app] ||= with_spinner("正在查找编译缓存中的 .app 文件") do
+          builder.find_cached_app!(options)
         end
+        puts "✅ 找到缓存 App: #{options[:app]}"
       end
 
       options[:description] ||= default_description(options)
@@ -638,6 +713,8 @@ module Appship
         start_date: config.get("upload", "start_date"),
         end_date: config.get("upload", "end_date"),
         channel: config.get("upload", "channel"),
+        wechat_webhook: config.get("upload", "wechat_webhook"),
+        dingtalk_webhook: config.get("upload", "dingtalk_webhook"),
         poll_attempts: config.get("upload", "poll_attempts", default: 60),
         upload: false
       }
@@ -818,6 +895,8 @@ module Appship
           appship message init
           appship message -e
           appship message -o path/to/message.txt
+          appship webhook wechat "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+          appship webhook dingtalk "https://oapi.dingtalk.com/robot/send?access_token=xxx"
           appship doctor
           appship pgyer
           appship fir

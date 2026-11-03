@@ -119,7 +119,8 @@ module Appship
       raise ConfigurationError, "文件不存在: #{file}" unless File.file?(file)
 
       result = Uploader.new(options).upload!(file)
-      Display.upload_result(result, file: file, options: options)
+      message = Display.upload_result(result, file: file, options: options)
+      Webhook.new(options).notify(message)
       result
     end
 
@@ -198,7 +199,8 @@ module Appship
       return unless options[:upload]
 
       result = Uploader.new(options).upload!(file)
-      Display.upload_result(result, file: file, options: options)
+      message = Display.upload_result(result, file: file, options: options)
+      Webhook.new(options).notify(message)
     end
 
     def required!(value, name)
@@ -217,8 +219,7 @@ module Appship
 
     def upload_result(result, file:, options: {})
       if result.is_a?(Hash) && result["provider"] == "fir"
-        fir_upload_result(result, file: file, options: options)
-        return
+        return fir_upload_result(result, file: file, options: options)
       end
 
       data = result.is_a?(Hash) ? (result["data"] || result) : {}
@@ -243,7 +244,7 @@ module Appship
       password ||= "未设置"
       url = key ? "https://www.pgyer.com/#{key}" : "https://www.pgyer.com/"
 
-      puts Message.render(
+      message = Message.render(
         name: name,
         build_type_name: build_type_name,
         version_info: version_info,
@@ -254,6 +255,8 @@ module Appship
         password: password,
         url: url
       )
+      puts message
+      message
     end
 
     def fir_upload_result(result, file:, options: {})
@@ -266,7 +269,7 @@ module Appship
                        build && !build.to_s.empty? ? "#{version}(#{build})" : version.to_s
                      end
 
-      puts Message.render(
+      message = Message.render(
         name: name,
         build_type_name: type,
         version_info: version_info,
@@ -277,6 +280,8 @@ module Appship
         password: data["password_protected"] ? "已设置" : "未设置",
         url: result["url"] || ""
       )
+      puts message
+      message
     end
 
     def deep_find(value, wanted_key)

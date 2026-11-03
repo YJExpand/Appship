@@ -78,6 +78,62 @@ class CacheTest < Minitest::Test
     end
   end
 
+  def test_first_time_setup_can_resume_after_interruption
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      FileUtils.mkdir_p(File.join(directory, "Demo.xcodeproj"))
+      original_stdin = $stdin
+      interrupted_input = InteractiveInput.new(["DemoApp"])
+      interrupted_input.define_singleton_method(:gets) { raise Interrupt }
+      $stdin = interrupted_input
+
+      capture_io do
+        assert_raises(Interrupt) { Appship::Cache.load(path, project_dir: directory) }
+      end
+      assert_equal [], JSON.parse(File.read(path))
+
+      $stdin = InteractiveInput.new(["DemoApp", "key", ""])
+      cache = nil
+      capture_io { cache = Appship::Cache.load(path, project_dir: directory) }
+      assert_equal "key", cache.entries.first["pgyer_api_key"]
+      assert_equal "", cache.entries.first["pgyer_password"]
+      assert_equal 0o600, File.stat(path).mode & 0o777
+    ensure
+      $stdin = original_stdin
+    end
+  end
+
+  def test_empty_array_without_terminal_gives_setup_instructions
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      content = "[ \n ]\n"
+      File.write(path, content)
+
+      error = assert_raises(Appship::ConfigurationError) { Appship::Cache.load(path, interactive: false) }
+      assert_includes error.message, "pgyer_api_key"
+      assert_equal content, File.read(path)
+    end
+  end
+
+  def test_eof_at_optional_password_does_not_commit_incomplete_setup
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      FileUtils.mkdir_p(File.join(directory, "Demo.xcodeproj"))
+      original_stdin = $stdin
+      input = InteractiveInput.new([])
+      input.define_singleton_method(:gets) { @lines ||= ["DemoApp\n", "key\n"]; @lines.shift }
+      $stdin = input
+
+      capture_io do
+        error = assert_raises(Appship::ConfigurationError) { Appship::Cache.load(path, project_dir: directory) }
+        assert_includes error.message, "输入已中断"
+      end
+      assert_equal [], JSON.parse(File.read(path))
+    ensure
+      $stdin = original_stdin
+    end
+  end
+
   def test_unmatched_project_prompts_for_configuration_without_changing_other_projects
     Dir.mktmpdir("iosBuild-") do |directory|
       FileUtils.mkdir_p(File.join(directory, "Demo.xcodeproj"))
@@ -102,6 +158,8 @@ class CacheTest < Minitest::Test
 
   def test_guides_new_project_setup_and_preserves_existing_profiles
     %w[pgyer fir].each do |provider|
+      key_field = provider == "fir" ? "fir_api_key" : "pgyer_api_key"
+      password_field = provider == "fir" ? "fir_password" : "pgyer_password"
       Dir.mktmpdir("iosBuild-") do |directory|
         FileUtils.mkdir_p(File.join(directory, "Demo.xcodeproj"))
         FileUtils.mkdir_p(File.join(directory, "Demo.xcworkspace"))
@@ -118,12 +176,16 @@ class CacheTest < Minitest::Test
         end
 
         assert_includes output, "请输入 app_name"
-        assert_includes output, "请输入 #{provider}_api_key"
-        assert_includes output, "请输入 #{provider}_password"
+        assert_includes output, "请输入 #{key_field}"
+        assert_includes output, "请输入 #{password_field}"
         assert_equal "Demo", profile["project_name"]
         assert_equal "DemoApp", profile["app_name"]
-        assert_equal "new-key", profile["#{provider}_api_key"]
-        assert_equal "", profile["#{provider}_password"]
+        assert_equal "new-key", profile[key_field]
+        assert_equal "", profile[password_field]
+        assert_equal "", profile["wechat_webhook"]
+        assert_equal "", profile["dingtalk_webhook"]
+        refute profile.key?("api_key")
+        refute profile.key?("password")
         assert_equal [existing, profile], JSON.parse(File.read(path))
         assert_equal 0o600, File.stat(path).mode & 0o777
         assert_equal profile, cache.resolve(project_dir: directory, provider: provider, interactive: false)
@@ -274,6 +336,74 @@ class CacheTest < Minitest::Test
       saved = JSON.parse(File.read(path)).first
       assert_equal "new-key", saved["fir_api_key"]
       assert_equal "new-password", saved["fir_password"]
+    end
+  end
+
+  def test_loading_provider_specific_keys_preserves_all_fields_without_rewriting
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      original = [
+        { "project_name" => "Demo", "pgyer_api_key" => "old-key", "pgyer_password" => "",
+          "fir_api_key" => "fir-key", "fir_password" => "fir-password", "wechat_webhook" => "keep-url" },
+        { "project_name" => "Other", "pgyer_api_key" => "other-key", "custom" => "keep" }
+      ]
+      content = JSON.generate(original)
+      File.write(path, content)
+
+      entries = Appship::Cache.load(path, interactive: false).entries
+
+      assert_equal "old-key", entries.first["pgyer_api_key"]
+      assert_equal "", entries.first["pgyer_password"]
+      refute entries.first.key?("api_key")
+      refute entries.first.key?("password")
+      assert_equal "fir-key", entries.first["fir_api_key"]
+      assert_equal "fir-password", entries.first["fir_password"]
+      assert_equal "keep-url", entries.first["wechat_webhook"]
+      assert_equal original.last, entries.last
+      assert_equal original, entries
+      assert_equal content, File.read(path)
+    end
+  end
+
+  def test_generic_keys_do_not_satisfy_pgyer_credentials
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      content = JSON.generate([{ "project_name" => "Demo", "api_key" => "generic-key", "password" => "generic-password" }])
+      File.write(path, content)
+
+      error = assert_raises(Appship::ConfigurationError) do
+        Appship::Cache.new(path).resolve(project_name: "Demo", interactive: false)
+      end
+
+      assert_includes error.message, "缓存缺少 pgyer_api_key"
+      assert_equal content, File.read(path)
+    end
+  end
+
+  def test_invalid_cache_is_not_rewritten
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      content = JSON.generate([{ "project_name" => "Demo", "pgyer_api_key" => "old-key" }, "invalid"])
+      File.write(path, content)
+
+      assert_raises(Appship::ConfigurationError) { Appship::Cache.new(path) }
+      assert_equal content, File.read(path)
+    end
+  end
+
+  def test_pgyer_credential_overrides_use_provider_specific_keys
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, ".config")
+      File.write(path, JSON.generate([{ "project_name" => "Demo", "pgyer_api_key" => "old-key", "pgyer_password" => "old-password" }]))
+
+      entry = Appship::Cache.new(path).resolve(
+        project_name: "Demo", interactive: false,
+        credential_overrides: { "pgyer_api_key" => "new-key", "pgyer_password" => "" }
+      )
+
+      assert_equal "new-key", entry["pgyer_api_key"]
+      assert_equal "", entry["pgyer_password"]
+      assert_equal [entry], JSON.parse(File.read(path))
     end
   end
 end
