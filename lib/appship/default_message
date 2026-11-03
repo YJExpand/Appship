@@ -1,0 +1,9 @@
+应用名称: %{name}
+应用类型: %{build_type_name}
+版本信息: %{version_info}
+构建模式: %{configuration}
+应用大小: %{build_size_mb}
+更新时间: %{build_updated}
+更新描述: %{description}
+安装密码: %{password}
+下载链接: %{url}

@@ -68,19 +68,54 @@ appship fir
 
 使用 fir.im 时，引导填写的字段为 `fir_api_key` 和 `fir_password`。使用 `--env-file` 时，新项目配置会保存到指定文件；非交互环境则提示手动补充配置。
 
-```
-=======================================================
-                   🎉 发布完成 🎉
-=======================================================
-分发平台: fir.im
+首次运行 `appship` 时，会自动初始化 `~/.appship/.default_message`，用于蒲公英和 fir.im 发布成功后的消息输出。该文件只保存消息模板，不保存 API Key 或真实密码；由程序维护并设置为只读（`0444`），随内置模板更新，不作为用户可编辑配置。
+
+```text
 应用名称: Demo
 应用类型: iOS
 版本信息: 1.0.0(42)
 更新描述: xxx
-访问密码: xxx
+安装密码: 已设置
 下载链接: https://fir.im/abc123
-=======================================================
 ```
+
+## 自定义发布消息
+
+创建 `~/.appship/message.txt` 并在终端打印变量说明、示例和相关命令：
+
+```bash
+appship message init
+```
+
+已有的 `message.txt` 不会被初始化覆盖。文件开头的 `/* ... */` 是备注，下面才是发布时使用的正文。例如：
+
+```text
+🚀 %{name} 发布成功
+版本：%{version_info}
+
+更新内容：
+%{description}
+
+下载地址：%{url}
+```
+
+编辑当前模板：
+
+```bash
+appship message -e
+```
+
+优先使用 `VISUAL` 或 `EDITOR` 指定的编辑器；未设置时使用 macOS 默认文本编辑器。
+
+使用指定文件覆盖当前模板（先校验内容，再替换文件）：
+
+```bash
+appship message -o /path/to/message.txt
+```
+
+支持的变量为 `name`、`build_type_name`、`version_info`、`configuration`、`build_size_mb`、`build_updated`、`description`、`password`、`url`，完整说明保存在文件备注中。`password` 在蒲公英中为安装密码，在 fir.im 中为密码设置状态。未获取到数据的字段会省略其所在行，建议将可选字段单独放在一行。正文只替换 `%{变量名}`，普通 `%` 原样保留，未知变量会在构建或上传前报错。
+
+发布时优先使用 `message.txt`；文件不存在时使用 `.default_message`。升级内置模板不会覆盖用户的 `message.txt`。
 
 ## 其他用法
 
@@ -104,9 +139,8 @@ appship fir -key xxx
 
 ```
 1、补充消息机器人
-2、自定义消息格式
-3、其他分发平台
-4、AI 接入git log ，自动归纳更新描述
-5、优化命令
+2、其他分发平台
+3、AI 接入git log ，自动归纳更新描述
+4、优化命令
 ...
 ```

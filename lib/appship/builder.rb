@@ -9,6 +9,7 @@ module Appship
     end
 
     def build!(options)
+      Message.template if options[:upload]
       target = target_options(options)
       scheme = required!(options[:scheme], "--scheme 或配置 scheme")
       configuration = options[:configuration] || "Debug"
@@ -99,6 +100,7 @@ module Appship
     end
 
     def package!(options)
+      Message.template if options[:upload]
       app = File.expand_path(required!(options[:app], "--app"))
       raise ConfigurationError, ".app 不存在: #{app}" unless File.directory?(app)
 
@@ -112,6 +114,7 @@ module Appship
     end
 
     def upload!(options)
+      Message.template
       file = File.expand_path(required!(options[:file], "IPA 文件路径"))
       raise ConfigurationError, "文件不存在: #{file}" unless File.file?(file)
 
@@ -240,20 +243,17 @@ module Appship
       password ||= "未设置"
       url = key ? "https://www.pgyer.com/#{key}" : "https://www.pgyer.com/"
 
-      puts ""
-      puts "======================================================="
-      puts "                   🎉 发布完成 🎉                      "
-      puts "======================================================="
-      puts "应用名称: #{name}"
-      puts "应用类型: #{build_type_name}"
-      puts "版本信息: #{version_info}" if version_info
-      puts "构建模式: #{configuration}"
-      puts "应用大小: #{build_size_mb}" if build_size_mb
-      puts "更新时间: #{build_updated}" if build_updated && !build_updated.to_s.empty?
-      puts "更新描述: #{description}"
-      puts "安装密码: #{password}"
-      puts "下载链接: #{url}"
-      puts "======================================================="
+      puts Message.render(
+        name: name,
+        build_type_name: build_type_name,
+        version_info: version_info,
+        configuration: configuration,
+        build_size_mb: build_size_mb,
+        build_updated: build_updated.to_s.empty? ? nil : build_updated,
+        description: description,
+        password: password,
+        url: url
+      )
     end
 
     def fir_upload_result(result, file:, options: {})
@@ -266,18 +266,17 @@ module Appship
                        build && !build.to_s.empty? ? "#{version}(#{build})" : version.to_s
                      end
 
-      puts ""
-      puts "======================================================="
-      puts "                   🎉 发布完成 🎉                      "
-      puts "======================================================="
-      puts "分发平台: fir.im"
-      puts "应用名称: #{name}"
-      puts "应用类型: #{type}"
-      puts "版本信息: #{version_info}" if version_info
-      puts "更新描述: #{options[:description] || ""}"
-      puts "访问密码: #{data["password_protected"] ? "已设置" : "未设置"}"
-      puts "下载链接: #{result["url"]}"
-      puts "======================================================="
+      puts Message.render(
+        name: name,
+        build_type_name: type,
+        version_info: version_info,
+        configuration: nil,
+        build_size_mb: nil,
+        build_updated: nil,
+        description: options[:description] || "",
+        password: data["password_protected"] ? "已设置" : "未设置",
+        url: result["url"] || ""
+      )
     end
 
     def deep_find(value, wanted_key)

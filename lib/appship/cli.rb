@@ -16,10 +16,13 @@ module Appship
       args = argv.dup
       global = extract_global_options!(args)
       command = args.shift
+      Message.initialize_default!
 
       case command
       when "init"
         init(args)
+      when "message"
+        message(args)
       when "doctor"
         doctor
       when "build"
@@ -89,6 +92,40 @@ module Appship
       end
       parser.parse!(args)
       puts "✅ 已创建配置文件: #{Config.write_template(path, force: force)}"
+    end
+
+    def message(args)
+      edit = false
+      source = nil
+      parser = OptionParser.new do |opts|
+        opts.banner = "用法: appship message init | -e | -o FILE"
+        opts.separator "  init                    创建 ~/.appship/message.txt 并打印备注，已有文件不覆盖"
+        opts.on("-e", "--edit", "编辑当前消息模板") { edit = true }
+        opts.on("-o FILE", "--overwrite FILE", "使用指定文件覆盖当前消息模板") { |value| source = value }
+        opts.on("-h", "--help", "显示帮助") { puts opts; exit 0 }
+      end
+      parser.parse!(args)
+      if args == ["init"] && !edit && !source
+        path = Message.init!
+        puts Message::INSTRUCTIONS
+        puts "✅ 消息模板已就绪（已有文件不会覆盖）: #{path}"
+      elsif args.empty? && edit && !source
+        path = Message.path
+        unless File.exist?(path)
+          raise ConfigurationError, "消息模板不存在，请先执行 appship message init"
+        end
+        Message.regular_file!(path)
+        editor = [ENV["VISUAL"], ENV["EDITOR"]].find { |value| !value.to_s.strip.empty? } || "open -t"
+        raise CommandError, "无法启动编辑器: #{editor}" unless system(*Shellwords.split(editor), path)
+      elsif args.empty? && source && !edit
+        puts "✅ 消息模板已覆盖: #{Message.overwrite!(source)}"
+      elsif args.empty? && !edit && !source
+        puts parser
+      else
+        raise ConfigurationError, "请单独使用 init、-e 或 -o FILE\n#{parser}"
+      end
+    rescue ArgumentError => e
+      raise ConfigurationError, "编辑器配置无效: #{e.message}"
     end
 
     def doctor
@@ -778,6 +815,9 @@ module Appship
 
         用法:
           appship init [--path .appship.yml]
+          appship message init
+          appship message -e
+          appship message -o path/to/message.txt
           appship doctor
           appship pgyer
           appship fir
