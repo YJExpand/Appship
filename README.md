@@ -146,9 +146,9 @@ feishu_webhook_failure_content: ""
 feishu_webhook_format: post
 ```
 
-#### message.yml可读参数如下：
+### message.yml可读参数如下：
 
-###### 发布成功
+##### 发布成功
 
 ```
 name            : 应用名称 
@@ -162,7 +162,7 @@ password        : 安装密码或密码设置状态
 url             : 应用下载链接
 ```
 
-###### 失败
+##### 失败
 
 以下变量用于各机器人的 `*_webhook_failure_content`，在文案中写成 `%{变量名}`。
 
@@ -186,12 +186,17 @@ feishu_webhook_failure_content: |
 失败文案不填写或无效时使用内置文案。失败通知以纯文本发送，发送前会隐藏已知的 API Key、密码、Webhook 地址和 URL 查询参数。
 
 [企微 Markdown 配置](https://cloud.tencent.com/document/product/248/50413)
+
 [飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)
+
 [钉钉群自定义机器人说明](https://open-dingtalk.github.io/developerpedia/docs/learn/bot/webhook/overview/)
 
 钉钉存量自定义机器人需配置匹配消息内容的关键词或出口 IP 白名单；Appship 不支持钉钉加签。Webhook 地址不会回显到终端，配置文件权限保持为 `0600`。
+
 接口参考：
+
 [企业微信文本消息示例](https://cloud.tencent.com/document/product/1831/134518)
+
 [钉钉机器人安全设置](https://open.dingtalk.com/document/robots/customize-robot-security-settings)
 
 ## 本地配置命令
