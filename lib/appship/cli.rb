@@ -17,17 +17,11 @@ module Appship
       args = argv.dup
       global = extract_global_options!(args)
       command = args.shift
-      if %w[build package upload pgyer fir].include?(command)
-        @notification_options = {}
-      else
-        Message.initialize_default!
-      end
+      @notification_options = {} if %w[build package upload pgyer fir].include?(command)
 
       case command
       when "init"
         init(args)
-      when "message"
-        message(args)
       when "webhook"
         webhook(args)
       when "doctor"
@@ -60,17 +54,19 @@ module Appship
       return unless @notification_options
 
       options = @notification_options.dup
-      unless [options[:wechat_webhook], options[:dingtalk_webhook]].any? { |url| !url.to_s.strip.empty? }
+      unless options.values_at(*Webhook::URL_FIELDS).any? { |url| !url.to_s.strip.empty? }
         path = File.expand_path(options[:env_file] || ENV.fetch("APPSHIP_ENV_FILE", Cache::DEFAULT_PATH))
-        return unless File.file?(path)
-
         directory = File.expand_path(options[:project_dir] || Dir.pwd)
-        if options[:project_name].to_s.empty? && Dir[File.join(directory, "*.xcodeproj"), File.join(directory, "*.xcworkspace")].empty?
+        local_path = ProjectConfig.path(directory)
+        return unless File.file?(path) || File.exist?(local_path) || File.symlink?(local_path)
+
+        if options[:project_name].to_s.empty? && !File.file?(local_path) && Dir[File.join(directory, "*.xcodeproj"), File.join(directory, "*.xcworkspace")].empty?
           return
         end
         begin
-          profile = Cache.new(path).resolve(project_name: options[:project_name], project_dir: directory,
-                                            interactive: false, credentials: false)
+          profile = ProjectConfig.load(path, project_dir: directory, interactive: false)
+                                 .resolve(project_name: options[:project_name], project_dir: directory,
+                                          interactive: false, credentials: false)
         rescue Error, SystemCallError
           return
         end
@@ -79,8 +75,7 @@ module Appship
           api_key: profile["pgyer_api_key"], password: profile["pgyer_password"],
           fir_api_token: profile["fir_api_key"], fir_password: profile["fir_password"]
         }.merge(options.compact)
-        options[:wechat_webhook] = profile["wechat_webhook"]
-        options[:dingtalk_webhook] = profile["dingtalk_webhook"]
+        Webhook::OPTION_FIELDS.each { |key| options[key] = profile[key.to_s] }
       end
       Webhook.new(options).failure(error)
     rescue StandardError => e
@@ -123,56 +118,25 @@ module Appship
     end
 
     def init(args)
-      path = File.join(Dir.pwd, ".appship.yml")
-      force = false
+      project_dir = Dir.pwd
       parser = OptionParser.new do |opts|
         opts.banner = "用法: appship init [选项]"
-        opts.on("--path PATH", "配置文件路径（默认 .appship.yml）") { |value| path = value }
-        opts.on("--force", "覆盖已有配置文件") { force = true }
+        opts.on("--project-dir PATH", "工程目录（默认当前目录）") { |value| project_dir = value }
         opts.on("-h", "--help", "显示帮助") { puts opts; exit 0 }
       end
       parser.parse!(args)
-      puts "✅ 已创建配置文件: #{Config.write_template(path, force: force)}"
-    end
+      raise ConfigurationError, "init 不接受多余参数: #{args.join(" ")}" unless args.empty?
 
-    def message(args)
-      edit = false
-      source = nil
-      parser = OptionParser.new do |opts|
-        opts.banner = "用法: appship message init | -e | -o FILE"
-        opts.separator "  init                    创建 ~/.appship/message.txt 并打印备注，已有文件不覆盖"
-        opts.on("-e", "--edit", "编辑当前消息模板") { edit = true }
-        opts.on("-o FILE", "--overwrite FILE", "使用指定文件覆盖当前消息模板") { |value| source = value }
-        opts.on("-h", "--help", "显示帮助") { puts opts; exit 0 }
+      ProjectConfig.init!(project_dir: File.expand_path(project_dir)).each do |path|
+        puts "✅ 项目示例已就绪（已有内容不会覆盖）: #{path}"
       end
-      parser.parse!(args)
-      if args == ["init"] && !edit && !source
-        path = Message.init!
-        puts Message::INSTRUCTIONS
-        puts "✅ 消息模板已就绪（已有文件不会覆盖）: #{path}"
-      elsif args.empty? && edit && !source
-        path = Message.path
-        unless File.exist?(path)
-          raise ConfigurationError, "消息模板不存在，请先执行 appship message init"
-        end
-        Message.regular_file!(path)
-        editor = [ENV["VISUAL"], ENV["EDITOR"]].find { |value| !value.to_s.strip.empty? } || "open -t"
-        raise CommandError, "无法启动编辑器: #{editor}" unless system(*Shellwords.split(editor), path)
-      elsif args.empty? && source && !edit
-        puts "✅ 消息模板已覆盖: #{Message.overwrite!(source)}"
-      elsif args.empty? && !edit && !source
-        puts parser
-      else
-        raise ConfigurationError, "请单独使用 init、-e 或 -o FILE\n#{parser}"
-      end
-    rescue ArgumentError => e
-      raise ConfigurationError, "编辑器配置无效: #{e.message}"
+      puts "复制为 appship/config.yml 和 appship/message.yml 后编辑，示例文件不会参与运行。"
     end
 
     def webhook(args)
       options = { project_dir: Dir.pwd, env_file: ENV.fetch("APPSHIP_ENV_FILE", Cache::DEFAULT_PATH), project_name: nil }
       parser = OptionParser.new do |opts|
-        opts.banner = '用法: appship webhook wechat|dingtalk URL [选项]（URL 传 "" 可关闭通知）'
+        opts.banner = '用法: appship webhook wechat|dingtalk|feishu URL [选项]（URL 传 "" 可关闭通知）'
         opts.on("--project-dir PATH", "项目目录（默认当前目录）") { |value| options[:project_dir] = value }
         opts.on("--env-file PATH", "本机缓存文件（默认 ~/.appship/.config）") { |value| options[:env_file] = value }
         opts.on("--project-name NAME", "配置中的 project_name") { |value| options[:project_name] = value }
@@ -181,7 +145,7 @@ module Appship
       parser.parse!(args)
       return puts(parser) if args.empty?
       unless args.length == 2 && Webhook::PLATFORMS.key?(args.first)
-        raise ConfigurationError, "请指定 wechat 或 dingtalk，以及完整的 Webhook URL\n#{parser}"
+        raise ConfigurationError, "请指定 wechat、dingtalk 或 feishu，以及完整的 Webhook URL\n#{parser}"
       end
 
       platform, url = args
@@ -190,7 +154,7 @@ module Appship
       project_dir = File.expand_path(options[:project_dir])
       raise ConfigurationError, "项目目录不存在: #{project_dir}" unless File.directory?(project_dir)
 
-      cache = Cache.load(options[:env_file], project_dir: project_dir, interactive: false)
+      cache = ProjectConfig.load(options[:env_file], project_dir: project_dir, interactive: false)
       profile = cache.resolve(project_name: options[:project_name], project_dir: project_dir, interactive: false, credentials: false)
       cache.update_profile!(profile, "#{platform}_webhook" => url)
       action = url.empty? ? "已关闭" : "已保存"
@@ -218,7 +182,7 @@ module Appship
         puts "#{available ? "✅" : "⚠️"} #{command.ljust(16)} #{available || "未安装"} - #{purpose}"
       end
       config = Config.find
-      puts "#{config.path ? "✅" : "ℹ️"} 配置文件       #{config.path || "当前目录没有 .appship.yml"}"
+      puts "#{config.path ? "✅" : "ℹ️"} 配置文件       #{config.path || "当前目录没有 appship/config.yml 或 .appship.yml"}"
     end
 
     def build(args, global)
@@ -227,7 +191,7 @@ module Appship
       @notification_options = options
       parser = build_parser(options)
       parser.parse!(args)
-      Message.initialize_default!
+      apply_badge_config!(options, config.data)
       Builder.new(runner: Runner.new(verbose: global[:verbose])).build!(options)
     end
 
@@ -236,14 +200,14 @@ module Appship
       options = upload_options(config).merge(
         app: nil,
         output: nil,
-        badge: config.get("badge"),
+        configuration: config.get("configuration"),
         assets: config.get("assets"),
         app_icon: config.get("app_icon", default: "AppIcon")
       )
       @notification_options = options
       parser = package_parser(options)
       parser.parse!(args)
-      Message.initialize_default!
+      apply_badge_config!(options, config.data)
       Builder.new(runner: Runner.new(verbose: global[:verbose])).package!(options)
     end
 
@@ -253,7 +217,6 @@ module Appship
       @notification_options = options
       parser = upload_parser(options)
       parser.parse!(args)
-      Message.initialize_default!
       options[:file] ||= args.shift
       raise ConfigurationError, "请指定 IPA/APK 文件路径" unless options[:file]
       raise ConfigurationError, "upload 不接受多余参数: #{args.join(" ")}" unless args.empty?
@@ -306,7 +269,6 @@ module Appship
       parser = pgyer_parser(options)
       normalize_provider_short_options!(args, "pgyer")
       parser.parse!(args)
-      Message.initialize_default!
       raise ConfigurationError, "pgyer 不接受多余参数: #{args.join(" ")}" unless args.empty?
 
       project_dir = File.expand_path(options[:project_dir])
@@ -314,7 +276,7 @@ module Appship
       env_file = File.expand_path(options[:env_file], Dir.pwd)
 
       Dir.chdir(project_dir) do
-        cache = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "pgyer")
+        cache = ProjectConfig.load(env_file, project_dir: project_dir, interactive: true, provider: "pgyer")
         profile = cache.resolve(
           project_name: options[:project_name],
           project_dir: project_dir,
@@ -327,7 +289,7 @@ module Appship
 
         runner = Runner.new(verbose: global[:verbose])
         builder = Builder.new(runner: runner)
-        prepare_pgyer_flow!(options, builder)
+        prepare_pgyer_flow!(options, builder, profile)
         if options[:build_mode] == "cache"
           options[:app] ||= builder.find_cached_app!(options)
           builder.package!(options)
@@ -385,7 +347,6 @@ module Appship
       parser = fir_parser(options)
       normalize_provider_short_options!(args, "fir")
       parser.parse!(args)
-      Message.initialize_default!
       raise ConfigurationError, "fir 不接受多余参数: #{args.join(" ")}" unless args.empty?
 
       project_dir = File.expand_path(options[:project_dir])
@@ -393,7 +354,7 @@ module Appship
       env_file = File.expand_path(options[:env_file], Dir.pwd)
 
       Dir.chdir(project_dir) do
-        cache = Cache.load(env_file, project_dir: project_dir, interactive: true, provider: "fir")
+        cache = ProjectConfig.load(env_file, project_dir: project_dir, interactive: true, provider: "fir")
         profile = cache.resolve(
           project_name: options[:project_name],
           project_dir: project_dir,
@@ -406,7 +367,7 @@ module Appship
 
         runner = Runner.new(verbose: global[:verbose])
         builder = Builder.new(runner: runner)
-        prepare_pgyer_flow!(options, builder)
+        prepare_pgyer_flow!(options, builder, profile)
         if options[:build_mode] == "cache"
           options[:app] ||= builder.find_cached_app!(options)
           builder.package!(options)
@@ -437,9 +398,7 @@ module Appship
       options[:configuration] ||= profile["configuration"] || "Debug"
       options[:assets] ||= profile["assets"]
       options[:app_icon] ||= profile["app_icon"] || "AppIcon"
-      options[:badge] ||= profile["badge"]
-      options[:wechat_webhook] = profile["wechat_webhook"]
-      options[:dingtalk_webhook] = profile["dingtalk_webhook"]
+      Webhook::OPTION_FIELDS.each { |key| options[key] = profile[key.to_s] }
       if provider.to_s != "fir"
         options[:password_env] ||= profile["pgyer_password_env"]
         options[:password] ||= profile["pgyer_password"]
@@ -492,7 +451,7 @@ module Appship
       "自动编译打包 | 分支：#{branch} | 构建人：#{user} | 配置：#{options[:configuration]} | 更新内容：#{content}"
     end
 
-    def prepare_pgyer_flow!(options, builder)
+    def prepare_pgyer_flow!(options, builder, profile)
       interactive = $stdin.tty? && $stdout.tty?
       unless options[:build_mode_explicit]
         options[:build_mode] = choose_build_mode if interactive
@@ -502,10 +461,8 @@ module Appship
         options[:configuration] = choose_configuration
       end
 
-      if options[:build_mode] == "cache"
-        options[:badge] ||= badge_text(options[:configuration]) unless options[:badge_explicit]
-      elsif !options[:badge_explicit] && interactive
-        options[:badge] = choose_badge ? badge_text(options[:configuration]) : nil
+      if options[:build_mode] != "cache"
+        apply_badge_config!(options, profile) { interactive && choose_badge }
       end
 
       unless options[:description_explicit] || !interactive
@@ -521,6 +478,7 @@ module Appship
           builder.find_cached_app!(options)
         end
         puts "✅ 找到缓存 App: #{options[:app]}"
+        apply_badge_config!(options, profile) { true }
       end
 
       options[:description] ||= default_description(options)
@@ -655,6 +613,22 @@ module Appship
       nil
     end
 
+    def apply_badge_config!(options, profile)
+      return if options[:badge_explicit]
+
+      %w[app_icon_badge app_icon_badge_environment].each do |key|
+        next if [nil, true, false].include?(profile[key])
+
+        raise ConfigurationError, "#{key} 必须是布尔值 true 或 false"
+      end
+      enabled = profile["app_icon_badge"]
+      environment = profile["app_icon_badge_environment"]
+      options[:badge] = enabled == false ? nil : profile["badge"]
+      return if enabled == false || environment == false || options[:badge]
+
+      options[:badge] = badge_text(options[:configuration]) if enabled || environment || (block_given? && yield)
+    end
+
     def badge_text(configuration)
       configuration.to_s.casecmp("release").zero? ? "RELEASE" : "DEBUG"
     end
@@ -678,7 +652,6 @@ module Appship
         export_method: config.get("export_method", default: "development"),
         signing_style: config.get("signing_style", default: "automatic"),
         team_id: config.get("team_id"),
-        badge: config.get("badge"),
         assets: config.get("assets"),
         app_icon: config.get("app_icon", default: "AppIcon"),
         upload: false,
@@ -692,29 +665,28 @@ module Appship
 
     def upload_options(config)
       {
-        provider: config.get("upload", "provider", default: "pgyer"),
-        api_key: nil,
+        provider: config.get("upload", "provider", default: config.get("provider", default: "pgyer")),
+        api_key: config.get("pgyer_api_key"),
         api_key_env: config.get("upload", "api_key_env", default: "PGYER_API_KEY"),
-        fir_api_token: nil,
+        fir_api_token: config.get("fir_api_key"),
         fir_api_token_env: config.get("upload", "fir_api_token_env", default: "FIR_API_TOKEN"),
-        fir_password: config.get("upload", "fir_password"),
+        fir_password: config.get("upload", "fir_password", default: config.get("fir_password")),
         fir_password_env: config.get("upload", "fir_password_env", default: "FIR_PASSWORD"),
-        bundle_id: config.get("upload", "bundle_id"),
-        app_name: config.get("upload", "app_name"),
-        app_version: config.get("upload", "app_version"),
-        build_number: config.get("upload", "build_number"),
+        bundle_id: config.get("upload", "bundle_id", default: config.get("bundle_id")),
+        app_name: config.get("upload", "app_name", default: config.get("app_name")),
+        app_version: config.get("upload", "app_version", default: config.get("app_version")),
+        build_number: config.get("upload", "build_number", default: config.get("build_number")),
         release_type: config.get("upload", "release_type"),
         icon: config.get("upload", "icon"),
-        install_type: config.get("upload", "install_type", default: 1),
-        password: nil,
+        install_type: config.get("upload", "install_type", default: config.get("pgyer_install_type", default: config.get("pgyer_password", default: "").to_s.empty? ? 1 : 2)),
+        password: config.get("pgyer_password"),
         password_env: config.get("upload", "password_env"),
         description: config.get("upload", "description"),
         install_date: config.get("upload", "install_date"),
         start_date: config.get("upload", "start_date"),
         end_date: config.get("upload", "end_date"),
         channel: config.get("upload", "channel"),
-        wechat_webhook: config.get("upload", "wechat_webhook"),
-        dingtalk_webhook: config.get("upload", "dingtalk_webhook"),
+        **Webhook::OPTION_FIELDS.to_h { |key| [key, config.get("upload", key, default: config.get(key))] },
         poll_attempts: config.get("upload", "poll_attempts", default: 60),
         upload: false
       }
@@ -741,8 +713,8 @@ module Appship
         opts.on("--no-allow-provisioning-updates", "不允许 xcodebuild 自动更新签名") { options[:allow_provisioning_updates] = false }
         opts.separator ""
         opts.separator "图标角标"
-        opts.on("--badge TEXT", "添加角标，例如 DEBUG 或 RELEASE") { |value| options[:badge] = value }
-        opts.on("--no-badge", "禁用配置文件里的角标") { options[:badge] = nil }
+        opts.on("--badge TEXT", "添加角标，例如 DEBUG 或 RELEASE") { |value| options[:badge] = value; options[:badge_explicit] = true }
+        opts.on("--no-badge", "禁用配置文件里的角标") { options[:badge] = nil; options[:badge_explicit] = true }
         opts.on("--assets PATH", "Assets.xcassets 路径") { |value| options[:assets] = value }
         opts.on("--app-icon NAME", "AppIcon 名称（默认 AppIcon）") { |value| options[:app_icon] = value }
         opts.separator ""
@@ -756,8 +728,8 @@ module Appship
         opts.banner = "用法: appship [--config FILE] package [选项]"
         opts.on("--app PATH", "已编译 .app 路径") { |value| options[:app] = value }
         opts.on("--output PATH", "最终 IPA 路径") { |value| options[:output] = value }
-        opts.on("--badge TEXT", "添加角标") { |value| options[:badge] = value }
-        opts.on("--no-badge", "禁用角标") { options[:badge] = nil }
+        opts.on("--badge TEXT", "添加角标") { |value| options[:badge] = value; options[:badge_explicit] = true }
+        opts.on("--no-badge", "禁用角标") { options[:badge] = nil; options[:badge_explicit] = true }
         opts.on("--assets PATH", "Assets.xcassets 路径") { |value| options[:assets] = value }
         opts.on("--app-icon NAME", "AppIcon 名称") { |value| options[:app_icon] = value }
         add_upload_options(opts, options)
@@ -891,12 +863,10 @@ module Appship
         appship #{VERSION} - 通用移动应用构建、打包和分发工具
 
         用法:
-          appship init [--path .appship.yml]
-          appship message init
-          appship message -e
-          appship message -o path/to/message.txt
+          appship init [--project-dir PATH]
           appship webhook wechat "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
           appship webhook dingtalk "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+          appship webhook feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
           appship doctor
           appship pgyer
           appship fir

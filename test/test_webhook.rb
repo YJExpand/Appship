@@ -34,10 +34,13 @@ class WebhookTest < Minitest::Test
   def setup
     @webhook_home = Dir.mktmpdir("appship-webhook-")
     @original_home = ENV["HOME"]
+    @original_directory = Dir.pwd
     ENV["HOME"] = @webhook_home
+    Dir.chdir(@webhook_home)
   end
 
   def teardown
+    Dir.chdir(@original_directory)
     ENV["HOME"] = @original_home
     FileUtils.remove_entry(@webhook_home)
   end
@@ -174,7 +177,7 @@ class WebhookTest < Minitest::Test
 
   def test_successful_uploads_send_the_exact_rendered_message
     FileUtils.mkdir_p(File.dirname(Appship::Message.path))
-    File.write(Appship::Message.path, "发布成功\n应用: %{name}\n下载: %{url}\n")
+    File.write(Appship::Message.path, YAML.dump("cli_content" => "发布成功\n应用: %{name}\n下载: %{url}\n"))
     file = File.join(@webhook_home, "Demo.ipa")
     File.write(file, "ipa-data")
     results = [
@@ -207,6 +210,129 @@ class WebhookTest < Minitest::Test
         assert_empty errors
       end
     end
+  end
+
+  def test_successful_upload_uses_each_channel_template_and_approved_format
+    FileUtils.mkdir_p(File.dirname(Appship::Message.path))
+    File.write(Appship::Message.path, <<~YAML)
+      cli_content: |
+        终端: %{name}
+      wechat_webhook_success_content: |
+        **企微: %{name}**
+      wechat_webhook_content: 旧版企微文案
+      wechat_webhook_failure_content: "%{password}"
+      wechat_webhook_format: markdown
+      dingtalk_webhook_content: |
+        钉钉: %{name}
+      feishu_webhook_success_content: |
+        飞书: %{name}
+        下载: %{url}
+      feishu_webhook_format: post
+    YAML
+    file = File.join(@webhook_home, "Demo.ipa")
+    File.write(file, "ipa-data")
+    options = {
+      file: file,
+      wechat_webhook: "https://example.test/wechat",
+      dingtalk_webhook: "https://example.test/dingtalk",
+      feishu_webhook: "https://example.test/feishu",
+      feishu_webhook_secret: "feishu-signing-secret"
+    }
+    result = { "provider" => "fir", "data" => { "name" => "Demo" }, "url" => "https://fir.im/demo" }
+    http = FakeHTTP.new(response, response, response('{"code":0,"msg":"success"}'))
+    output, errors = capture_io do
+      with_constructor(Net::HTTP, http) do
+        with_constructor(Appship::Uploader, FakeUploader.new(result)) { Appship::Builder.new.upload!(options) }
+      end
+    end
+
+    wechat, dingtalk, feishu = http.requests.map { |request| JSON.parse(request.body) }
+    assert_includes output, "终端: Demo\n"
+    refute_includes output, "企微: Demo"
+    refute_includes output, "feishu-signing-secret"
+    assert_empty errors
+    assert_equal({ "msgtype" => "markdown", "markdown" => { "content" => "**企微: Demo**\n" } }, wechat)
+    assert_equal "钉钉: Demo\n", dingtalk.dig("text", "content")
+    assert_equal "post", feishu["msg_type"]
+    paragraphs = feishu.dig("content", "post", "zh_cn", "content")
+    assert_equal({ "tag" => "text", "text" => "飞书: Demo" }, paragraphs.first.first)
+    assert_equal({ "tag" => "a", "text" => "https://fir.im/demo", "href" => "https://fir.im/demo" }, paragraphs.last.last)
+    expected_signature = OpenSSL::HMAC.digest("SHA256", "#{feishu.fetch("timestamp")}\nfeishu-signing-secret", "")
+    assert_equal expected_signature, feishu.fetch("sign").unpack1("m0")
+  end
+
+  def test_custom_failure_messages_use_project_directory_and_keep_redaction
+    project = File.join(@webhook_home, "project")
+    path = Appship::Message.path(project)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, <<~YAML)
+      cli_content: "成功文案"
+      wechat_webhook_success_content: "企微成功"
+      wechat_webhook_failure_content: |
+        企微失败：%{name} / %{provider} / %{configuration}
+        %{error_type}：%{error_message}
+      wechat_webhook_format: markdown
+      dingtalk_webhook_failure_content: "%{password}"
+      feishu_webhook_failure_content: "飞书失败：%{error_message}"
+      feishu_webhook_format: post
+    YAML
+    options = {
+      project_dir: project, app_name: "Demo", provider: "fir", configuration: "Release",
+      wechat_webhook: "https://example.test/wechat?key=wechat-secret",
+      dingtalk_webhook: "https://example.test/dingtalk",
+      feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-token",
+      feishu_webhook_secret: "signing-secret", api_key: "api-secret"
+    }
+    error = Appship::CommandError.new("归档失败 api-secret feishu-token signing-secret https://upload.test/path?token=query-secret")
+    http = FakeHTTP.new(response, response, response('{"code":0}'))
+    _output, warnings = capture_io do
+      with_constructor(Net::HTTP, http) { Appship::Webhook.new(options).failure(error) }
+    end
+
+    wechat, dingtalk, feishu = http.requests.map { |request| JSON.parse(request.body) }
+    assert_equal "text", wechat["msgtype"]
+    assert_equal "text", feishu["msg_type"]
+    assert feishu.key?("sign")
+    assert_includes wechat.dig("text", "content"), "企微失败：Demo / fir.im / Release"
+    assert_includes wechat.dig("text", "content"), "Appship::CommandError"
+    assert_includes dingtalk.dig("text", "content"), "Appship 发布流程失败"
+    assert_includes feishu.dig("content", "text"), "飞书失败：归档失败"
+    assert_includes warnings, "dingtalk_webhook_failure_content 无效"
+    refute_match(/api-secret|feishu-token|signing-secret|query-secret|企微成功/, http.requests.map(&:body).join)
+  end
+
+  def test_invalid_message_yaml_does_not_prevent_builtin_failure_notification
+    path = Appship::Message.path
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "cli_content: [")
+    http = FakeHTTP.new(response)
+    _output, warnings = capture_io do
+      with_constructor(Net::HTTP, http) do
+        Appship::Webhook.new(wechat_webhook: "https://example.test/send").failure(Appship::CommandError.new("上传失败"))
+      end
+    end
+
+    assert_includes JSON.parse(http.requests.first.body).dig("text", "content"), "上传失败"
+    assert_includes warnings, "无法读取失败消息模板"
+  end
+
+  def test_feishu_uses_text_without_signature_by_default_and_hides_secrets_on_failure
+    url = "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-token"
+    http = FakeHTTP.new(response('{"code":0}'), response('{"code":0}'))
+    capture_io do
+      with_constructor(Net::HTTP, http) do
+        Appship::Webhook.new(feishu_webhook: url).notify("发布成功")
+        Appship::Webhook.new(feishu_webhook: url, feishu_webhook_secret: "signing-secret")
+                        .failure(Appship::CommandError.new("error #{url} feishu-token signing-secret"))
+      end
+    end
+
+    text, failure = http.requests.map { |request| JSON.parse(request.body) }
+    assert_equal({ "msg_type" => "text", "content" => { "text" => "发布成功" } }, text)
+    assert_equal "text", failure["msg_type"]
+    assert failure.key?("sign")
+    assert_includes failure.dig("content", "text"), "发布流程失败"
+    refute_match(/feishu-token|signing-secret/, failure.dig("content", "text"))
   end
 
   def test_upload_failure_never_sends_success_notification

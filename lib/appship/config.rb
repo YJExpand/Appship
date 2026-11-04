@@ -29,9 +29,11 @@ module Appship
 
     attr_reader :path, :data
 
-    def initialize(path = nil)
+    def initialize(path = nil, data: nil)
       @path = path && File.expand_path(path)
-      @data = if @path && File.file?(@path)
+      @data = if data
+                data
+              elsif @path && File.file?(@path)
                 YAML.safe_load(File.read(@path), permitted_classes: [], aliases: false) || {}
               else
                 {}
@@ -50,6 +52,20 @@ module Appship
 
     def self.find(path = nil)
       return new(path) if path
+
+      local_path = ProjectConfig.path
+      if File.exist?(local_path) || File.symlink?(local_path)
+        profile = ProjectConfig.load(ENV.fetch("APPSHIP_ENV_FILE", Cache::DEFAULT_PATH), interactive: false)
+                               .resolve(interactive: false, credentials: false)
+        profile["scheme"] ||= profile["project_name"]
+        unless profile["workspace"] || profile["project"]
+          workspace = "#{profile["project_name"]}.xcworkspace"
+          project = "#{profile["project_name"]}.xcodeproj"
+          profile["workspace"] = workspace if File.directory?(workspace)
+          profile["project"] = project if !profile["workspace"] && File.directory?(project)
+        end
+        return new(local_path, data: profile)
+      end
 
       candidates = [
         File.join(Dir.pwd, ".appship.yml"),

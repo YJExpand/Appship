@@ -9,7 +9,7 @@ module Appship
     end
 
     def build!(options)
-      Message.template if options[:upload]
+      templates = Message.templates if options[:upload]
       target = target_options(options)
       scheme = required!(options[:scheme], "--scheme 或配置 scheme")
       configuration = options[:configuration] || "Debug"
@@ -59,7 +59,7 @@ module Appship
         end
         puts "✅ IPA 已生成: #{output}"
 
-        upload_if_requested!(output, options)
+        upload_if_requested!(output, options, templates)
         output
       ensure
         FileUtils.rm_rf(temp_root) if temp_root && !options[:keep_temporary]
@@ -100,7 +100,7 @@ module Appship
     end
 
     def package!(options)
-      Message.template if options[:upload]
+      templates = Message.templates if options[:upload]
       app = File.expand_path(required!(options[:app], "--app"))
       raise ConfigurationError, ".app 不存在: #{app}" unless File.directory?(app)
 
@@ -109,19 +109,16 @@ module Appship
       runner.require_command!("unzip", "macOS 通常自带 unzip") if options[:badge]
       Ipa.package!(app, output: output, badge: options[:badge], assets: options[:assets], app_icon: options[:app_icon], runner: runner)
       puts "✅ IPA 已生成: #{output}"
-      upload_if_requested!(output, options)
+      upload_if_requested!(output, options, templates)
       output
     end
 
     def upload!(options)
-      Message.template
+      templates = Message.templates
       file = File.expand_path(required!(options[:file], "IPA 文件路径"))
       raise ConfigurationError, "文件不存在: #{file}" unless File.file?(file)
 
-      result = Uploader.new(options).upload!(file)
-      message = Display.upload_result(result, file: file, options: options)
-      Webhook.new(options).notify(message)
-      result
+      upload_file!(file, options, templates)
     end
 
     private
@@ -195,12 +192,17 @@ module Appship
       PLIST
     end
 
-    def upload_if_requested!(file, options)
+    def upload_if_requested!(file, options, templates = nil)
       return unless options[:upload]
 
+      upload_file!(file, options, templates || Message.templates)
+    end
+
+    def upload_file!(file, options, templates)
       result = Uploader.new(options).upload!(file)
-      message = Display.upload_result(result, file: file, options: options)
-      Webhook.new(options).notify(message)
+      messages = Display.upload_result(result, file: file, options: options, templates: templates)
+      Webhook.new(options).notify(messages, formats: templates.slice(*Message::FORMATS.keys))
+      result
     end
 
     def required!(value, name)
@@ -217,11 +219,18 @@ module Appship
   module Display
     module_function
 
-    def upload_result(result, file:, options: {})
-      if result.is_a?(Hash) && result["provider"] == "fir"
-        return fir_upload_result(result, file: file, options: options)
-      end
+    def upload_result(result, file:, options: {}, templates: Message.templates)
+      values = if result.is_a?(Hash) && result["provider"] == "fir"
+                 fir_message_values(result, file: file, options: options)
+               else
+                 pgyer_message_values(result, file: file, options: options)
+               end
+      messages = templates.slice(*Message::CONTENT_FIELDS).transform_values { |body| Message.render_text(body, values) }
+      puts messages.fetch("cli_content")
+      messages
+    end
 
+    def pgyer_message_values(result, file:, options:)
       data = result.is_a?(Hash) ? (result["data"] || result) : {}
       key = deep_find(data, "buildKey")
       name = deep_find(data, "buildName") || options[:app_name] || File.basename(file, File.extname(file))
@@ -244,7 +253,7 @@ module Appship
       password ||= "未设置"
       url = key ? "https://www.pgyer.com/#{key}" : "https://www.pgyer.com/"
 
-      message = Message.render(
+      {
         name: name,
         build_type_name: build_type_name,
         version_info: version_info,
@@ -254,12 +263,10 @@ module Appship
         description: description,
         password: password,
         url: url
-      )
-      puts message
-      message
+      }
     end
 
-    def fir_upload_result(result, file:, options: {})
+    def fir_message_values(result, file:, options:)
       data = result["data"].is_a?(Hash) ? result["data"] : result
       name = data["name"] || options[:app_name] || File.basename(file, File.extname(file))
       type = data["type"].to_s == "android" ? "Android" : "iOS"
@@ -269,7 +276,7 @@ module Appship
                        build && !build.to_s.empty? ? "#{version}(#{build})" : version.to_s
                      end
 
-      message = Message.render(
+      {
         name: name,
         build_type_name: type,
         version_info: version_info,
@@ -279,9 +286,7 @@ module Appship
         description: options[:description] || "",
         password: data["password_protected"] ? "已设置" : "未设置",
         url: result["url"] || ""
-      )
-      puts message
-      message
+      }
     end
 
     def deep_find(value, wanted_key)

@@ -2,7 +2,9 @@
 
 module Appship
   class Webhook
-    PLATFORMS = { "wechat" => "企业微信", "dingtalk" => "钉钉" }.freeze
+    PLATFORMS = { "wechat" => "企业微信", "dingtalk" => "钉钉", "feishu" => "飞书" }.freeze
+    URL_FIELDS = PLATFORMS.keys.map { |platform| :"#{platform}_webhook" }.freeze
+    OPTION_FIELDS = (URL_FIELDS + [:feishu_webhook_secret]).freeze
 
     def self.parse_url!(url)
       uri = URI.parse(url)
@@ -18,15 +20,19 @@ module Appship
       @options = options
     end
 
-    def notify(message, failure: false)
+    def notify(message, failure: false, formats: {})
       label = failure ? "失败通知" : "发布通知"
       context = failure ? "" : "（应用已发布）"
       PLATFORMS.each do |platform, name|
         url = @options["#{platform}_webhook".to_sym].to_s.strip
         next if url.empty?
 
+        content = content_for(message, platform, failure)
+        next if content.to_s.strip.empty?
+
         begin
-          post!(self.class.parse_url!(url), message)
+          format = failure ? nil : formats["#{platform}_webhook_format"]
+          post!(self.class.parse_url!(url), platform, content, format)
           puts "✅ #{name}#{label}已发送"
         rescue Error => e
           warn "⚠️ #{name}#{label}失败#{context}: #{e.message}"
@@ -37,15 +43,47 @@ module Appship
     end
 
     def failure(error)
+      return unless @options.values_at(*URL_FIELDS).any? { |url| !url.to_s.strip.empty? }
+
+      values = {
+        name: @options[:app_name] || @options[:project_name] || "未知",
+        provider: @options[:provider] == "fir" ? "fir.im" : "蒲公英",
+        configuration: @options[:configuration] || "未选择",
+        error_type: error.class.to_s,
+        error_message: error.message
+      }
       message = [
         "❌ Appship 发布流程失败",
-        "应用名称: #{@options[:app_name] || @options[:project_name] || "未知"}",
-        "分发平台: #{@options[:provider] == "fir" ? "fir.im" : "蒲公英"}",
-        "构建配置: #{@options[:configuration] || "未选择"}",
-        "错误类型: #{error.class}",
-        "错误原因: #{error.message}"
+        "应用名称: #{values[:name]}",
+        "分发平台: #{values[:provider]}",
+        "构建配置: #{values[:configuration]}",
+        "错误类型: #{values[:error_type]}",
+        "错误原因: #{values[:error_message]}"
       ].join("\n")
-      secrets = @options.values_at(:api_key, :password, :fir_api_token, :fir_password, :wechat_webhook, :dingtalk_webhook)
+      templates = Message.failure_templates(project_dir: @options[:project_dir] || Dir.pwd)
+      if templates.empty?
+        notify(safe_failure_content(message), failure: true)
+      else
+        messages = templates.transform_values { |body| Message.render_text(body, values) }
+        messages["default"] = message
+        notify(messages.transform_values { |body| safe_failure_content(body) }, failure: true)
+      end
+    end
+
+    private
+
+    def content_for(message, platform, failure)
+      return message unless message.is_a?(Hash)
+      return message.fetch("#{platform}_webhook_failure_content", message["default"]) if failure
+
+      message.fetch("#{platform}_webhook_success_content") do
+        message.fetch("#{platform}_webhook_content", message["cli_content"])
+      end
+    end
+
+    def safe_failure_content(message)
+      secrets = @options.values_at(:api_key, :password, :fir_api_token, :fir_password, *OPTION_FIELDS)
+      secrets << @options[:feishu_webhook].to_s[%r{/open-apis/bot/v2/hook/([^/?#]+)}, 1]
       env_names = %w[PGYER_API_KEY PGYER_INSTALL_PASSWORD FIR_API_TOKEN FIR_PASSWORD]
       env_names += @options.values_at(:api_key_env, :password_env, :fir_api_token_env, :fir_password_env).compact
       secrets += env_names.map { |name| ENV[name] }
@@ -53,15 +91,13 @@ module Appship
         message = message.gsub(secret, "[已隐藏]")
       end
       message = message.gsub(%r{(https?://[^\s"'<>?]+)\?[^\s"'<>]+}, '\\1?[已隐藏]')
-      notify(message.byteslice(0, 1900).scrub(""), failure: true)
+      message.byteslice(0, 1900).scrub("")
     end
 
-    private
-
-    def post!(uri, message)
+    def post!(uri, platform, message, format)
       request = Net::HTTP::Post.new(uri)
       request["Content-Type"] = "application/json; charset=utf-8"
-      request.body = JSON.generate(msgtype: "text", text: { content: message })
+      request.body = JSON.generate(payload(platform, message, format))
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = true
       http.open_timeout = 10
@@ -72,10 +108,44 @@ module Appship
       raise CommandError, "机器人返回 HTTP #{response.code}" unless response.is_a?(Net::HTTPSuccess)
 
       data = JSON.parse(response.body)
-      code = data.is_a?(Hash) ? data["errcode"] : nil
+      code = if data.is_a?(Hash)
+               platform == "feishu" ? data.fetch("code", data["StatusCode"]) : data["errcode"]
+             end
       raise CommandError, "机器人未返回成功状态（错误码 #{code || "缺失"}）" unless code.to_s == "0"
     rescue JSON::ParserError
       raise CommandError, "机器人返回了无法解析的响应"
+    end
+
+    def payload(platform, message, format)
+      if platform == "feishu"
+        body = if format == "post"
+                 paragraphs = message.lines.filter_map do |line|
+                   next if line.strip.empty?
+
+                   line.chomp.split(%r{(https?://[^\s<>"，。]+)}).reject(&:empty?).map do |part|
+                     if part.start_with?("http://", "https://")
+                       { tag: "a", text: part, href: part }
+                     else
+                       { tag: "text", text: part }
+                     end
+                   end
+                 end
+                 { msg_type: "post", content: { post: { zh_cn: { title: "Appship 发布通知", content: paragraphs } } } }
+               else
+                 { msg_type: "text", content: { text: message } }
+               end
+        secret = @options[:feishu_webhook_secret].to_s
+        unless secret.empty?
+          timestamp = Time.now.to_i.to_s
+          body[:timestamp] = timestamp
+          body[:sign] = [OpenSSL::HMAC.digest("SHA256", "#{timestamp}\n#{secret}", "")].pack("m0")
+        end
+        body
+      elsif platform == "wechat" && format == "markdown"
+        { msgtype: "markdown", markdown: { content: message } }
+      else
+        { msgtype: "text", text: { content: message } }
+      end
     end
   end
 end

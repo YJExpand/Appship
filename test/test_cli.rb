@@ -28,7 +28,7 @@ class CLITest < Minitest::Test
   end
 
   class FailingBuilder
-    attr_reader :calls
+    attr_reader :calls, :options
 
     def initialize(error)
       @error = error
@@ -40,12 +40,14 @@ class CLITest < Minitest::Test
       raise @error
     end
 
-    def build!(_options)
+    def build!(options)
+      @options = options
       @calls << :build
       raise @error
     end
 
-    def package!(_options)
+    def package!(options)
+      @options = options
       @calls << :package
       raise @error
     end
@@ -116,6 +118,104 @@ class CLITest < Minitest::Test
     end
   end
 
+  def test_both_release_commands_use_partial_project_config_and_persist_credentials_locally
+    %w[pgyer fir].each do |provider|
+      args = configured_release_args(provider) + ["--rebuild", "-key", "local-key", "-password", ""]
+      local_path = Appship::ProjectConfig.path(@project_dir)
+      FileUtils.mkdir_p(File.dirname(local_path))
+      File.write(local_path, YAML.dump("project_name" => "Demo", "app_name" => "LocalApp", "configuration" => "Release",
+                                       "app_icon_badge" => true, "badge" => "QA"))
+      global_content = File.read(@cache_path)
+
+      with_release_fakes(Appship::CommandError.new("stop before archive")) do |builder, messages|
+        capture_io { assert_raises(Appship::CommandError) { Appship::CLI.new.start(args) } }
+
+        assert_equal [:build], builder.calls
+        assert_equal "LocalApp", builder.options[:app_name]
+        assert_equal "Release", builder.options[:configuration]
+        assert_nil builder.options[:badge]
+        assert_equal "local-key", builder.options[provider == "fir" ? :fir_api_token : :api_key]
+        assert_equal "", builder.options[provider == "fir" ? :fir_password : :password]
+        assert_equal @profiles.first["wechat_webhook"], builder.options[:wechat_webhook]
+        assert_equal 1, messages.length
+        assert_includes messages.first[:message], "LocalApp"
+      end
+      saved = YAML.safe_load_file(local_path)
+      assert_equal "local-key", saved["#{provider}_api_key"]
+      assert_equal "", saved["#{provider}_password"]
+      refute saved.key?(provider == "fir" ? "pgyer_api_key" : "fir_api_key")
+      assert_equal global_content, File.read(@cache_path)
+    end
+  end
+
+  def test_app_icon_badge_settings_override_automatic_choices
+    cli = Appship::CLI.new
+    cases = [
+      [{ "app_icon_badge" => false, "app_icon_badge_environment" => true, "badge" => "QA" }, nil],
+      [{ "app_icon_badge" => true }, "RELEASE"],
+      [{ "app_icon_badge_environment" => true }, "RELEASE"],
+      [{ "app_icon_badge" => true, "app_icon_badge_environment" => false, "app_icon_badge_version" => true }, nil],
+      [{ "app_icon_badge_environment" => false, "badge" => "QA" }, "QA"]
+    ]
+    cases.each do |profile, expected|
+      options = { configuration: "Release" }
+      cli.send(:apply_badge_config!, options, profile) { flunk "should not prompt for a badge" }
+      expected ? assert_equal(expected, options[:badge]) : assert_nil(options[:badge])
+    end
+    assert_raises(Appship::ConfigurationError) do
+      cli.send(:apply_badge_config!, {}, { "app_icon_badge" => "false" })
+    end
+  end
+
+  def test_cache_badge_uses_configuration_of_the_package_found
+    cli = Appship::CLI.new
+    builder = Object.new
+    builder.define_singleton_method(:find_cached_app!) do |options|
+      options[:configuration] = "Release"
+      "Demo.app"
+    end
+    options = { build_mode: "cache", build_mode_explicit: true, configuration: "Debug", description: "test" }
+
+    capture_io { cli.send(:prepare_pgyer_flow!, options, builder, { "app_icon_badge" => true }) }
+
+    assert_equal "Demo.app", options[:app]
+    assert_equal "RELEASE", options[:badge]
+  end
+
+  def test_build_and_package_resolve_badges_after_cli_options
+    path = File.join(@cli_home, "config.yml")
+    File.write(path, YAML.dump("configuration" => "Debug", "app_icon_badge" => true))
+
+    [
+      [%w[build --configuration Release], "RELEASE"],
+      [%w[package --no-badge], nil],
+      [%w[package], "DEBUG"],
+      [%w[package --badge QA], "QA"]
+    ].each do |command, expected|
+      with_release_fakes(Appship::CommandError.new("stop before build")) do |builder, _messages|
+        capture_io { assert_raises(Appship::CommandError) { Appship::CLI.new.start(["--config", path, *command]) } }
+        expected ? assert_equal(expected, builder.options[:badge]) : assert_nil(builder.options[:badge])
+      end
+    end
+  end
+
+  def test_missing_credentials_can_notify_from_local_only_profile
+    args = ["pgyer", "--project-dir", @project_dir, "--env-file", File.join(@cli_home, "missing.config"), "--rebuild"]
+    local_path = Appship::ProjectConfig.path(@project_dir)
+    FileUtils.mkdir_p(File.dirname(local_path))
+    File.write(local_path, JSON.generate("project_name" => "Demo", "app_name" => "LocalApp", "feishu_webhook" => "https://example.test/local"))
+
+    with_release_fakes(Appship::CommandError.new("must not build")) do |builder, messages|
+      capture_io { assert_raises(Appship::ConfigurationError) { Appship::CLI.new.start(args) } }
+
+      assert_empty builder.calls
+      assert_equal 1, messages.length
+      assert_includes messages.first[:message], "缺少 pgyer_api_key"
+      assert_includes messages.first[:message], "LocalApp"
+    end
+    refute File.exist?(File.join(@cli_home, "missing.config"))
+  end
+
   def test_unexpected_exception_and_user_interruption_notify_and_keep_original_error
     [RuntimeError.new("unexpected failure"), Interrupt.new("cancelled")].each do |error|
       args = configured_release_args + ["--rebuild", "--configuration", "Release"]
@@ -163,7 +263,8 @@ class CLITest < Minitest::Test
   def test_webhook_settings_save_without_credentials_or_exposing_urls
     {
       "wechat" => "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key",
-      "dingtalk" => "https://oapi.dingtalk.com/robot/send?access_token=test-token"
+      "dingtalk" => "https://oapi.dingtalk.com/robot/send?access_token=test-token",
+      "feishu" => "https://open.feishu.cn/open-apis/bot/v2/hook/test-token"
     }.each do |platform, url|
       output, errors = capture_io do
         Appship::CLI.new.start(["webhook", platform, url, "--project-dir", @project_dir, "--env-file", @cache_path])
@@ -215,7 +316,8 @@ class CLITest < Minitest::Test
     options = {}
     profile = { "project_name" => "Demo", "app_name" => "DemoApp", "pgyer_api_key" => "key", "pgyer_password" => "",
                 "fir_api_key" => "fir-key", "fir_password" => "fir-password",
-                "wechat_webhook" => "https://example.test/wechat", "dingtalk_webhook" => "https://example.test/dingtalk" }
+                "wechat_webhook" => "https://example.test/wechat", "dingtalk_webhook" => "https://example.test/dingtalk",
+                "feishu_webhook" => "https://example.test/feishu", "feishu_webhook_secret" => "signing-secret" }
 
     capture_io { Appship::CLI.new.send(:apply_cached_profile!, options, profile) }
 
@@ -224,6 +326,8 @@ class CLITest < Minitest::Test
     assert_equal 1, options[:install_type]
     assert_equal profile["wechat_webhook"], options[:wechat_webhook]
     assert_equal profile["dingtalk_webhook"], options[:dingtalk_webhook]
+    assert_equal profile["feishu_webhook"], options[:feishu_webhook]
+    assert_equal profile["feishu_webhook_secret"], options[:feishu_webhook_secret]
   end
 
   def test_unmatched_target_prompts_for_project_configuration

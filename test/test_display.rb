@@ -7,40 +7,44 @@ class DisplayTest < Minitest::Test
   def setup
     @home = Dir.mktmpdir("appship-display-")
     @original_home = ENV["HOME"]
+    @original_directory = Dir.pwd
     ENV["HOME"] = @home
-    @message_path = File.join(@home, ".appship", ".default_message")
+    Dir.chdir(@home)
+    @message_path = Appship::Message.path
   end
 
   def teardown
+    Dir.chdir(@original_directory)
     ENV["HOME"] = @original_home
     FileUtils.remove_entry(@home)
   end
 
-  def test_first_cli_use_initializes_read_only_default_message
+  def test_version_does_not_create_message_files
     output, = capture_io { Appship::CLI.new.start(["--version"]) }
 
     assert_equal "appship #{Appship::VERSION}\n", output
-    assert_equal File.read(File.expand_path("../lib/appship/default_message", __dir__)), File.read(@message_path)
-    assert_equal 0o444, File.stat(@message_path).mode & 0o777
+    refute File.exist?(@message_path)
+    refute File.exist?(File.join(@home, ".appship"))
   end
 
-  def test_default_template_is_updated_from_bundled_version_and_made_read_only
-    FileUtils.mkdir_p(File.dirname(@message_path))
-    File.write(@message_path, "旧默认模板: %{provider} %{password_label}\n")
-
-    2.times { Appship::Message.initialize_default! }
+  def test_missing_project_template_uses_bundle_without_reading_or_writing_global_messages
+    legacy_path = File.join(@home, ".appship", "message.txt")
+    FileUtils.mkdir_p(File.dirname(legacy_path))
+    File.write(legacy_path, "旧全局模板\n")
     output, = capture_io { Appship::Display.upload_result({}, file: "Demo.ipa") }
 
-    assert_equal File.read(File.expand_path("../lib/appship/default_message", __dir__)), File.read(@message_path)
+    assert_equal File.read(File.expand_path("../lib/appship/default_message", __dir__)), Appship::Message.template
     assert_includes output, "应用名称: Demo\n"
-    assert_equal 0o444, File.stat(@message_path).mode & 0o777
+    assert_equal "旧全局模板\n", File.read(legacy_path)
+    refute File.exist?(File.join(@home, ".appship", ".default_message"))
+    refute File.exist?(@message_path)
   end
 
   def test_rejects_directory_at_message_path_without_changing_permissions
     FileUtils.mkdir_p(@message_path, mode: 0o700)
     original_mode = File.stat(@message_path).mode
 
-    error = assert_raises(Appship::ConfigurationError) { Appship::Message.initialize_default! }
+    error = assert_raises(Appship::ConfigurationError) { Appship::Message.template }
 
     assert_includes error.message, "消息模板必须是普通文件"
     assert_equal original_mode, File.stat(@message_path).mode
@@ -52,7 +56,7 @@ class DisplayTest < Minitest::Test
     FileUtils.mkdir_p(File.dirname(@message_path))
     File.symlink(target, @message_path)
 
-    assert_raises(Appship::ConfigurationError) { Appship::Message.initialize_default! }
+    assert_raises(Appship::ConfigurationError) { Appship::Message.template }
 
     assert_equal "keep", File.read(target)
     assert_equal 0o600, File.stat(target).mode & 0o777
@@ -76,7 +80,7 @@ class DisplayTest < Minitest::Test
     assert_includes output, "构建模式: Release\n应用大小: 1.5MB\n更新时间: 2026-10-26 10:00:00\n"
     assert_includes output, "更新描述: 完成 100% %{url}\n安装密码: install-secret\n下载链接: https://www.pgyer.com/demo\n"
     refute_includes output, "分发平台:"
-    refute_includes File.read(@message_path), "install-secret"
+    refute_includes Appship::Message.template, "install-secret"
   end
 
   def test_pgyer_output_omits_missing_optional_fields
